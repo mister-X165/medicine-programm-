@@ -44,14 +44,22 @@ const ADMIN_SPECIALIZATION = "Administrator";
 //     X-Bootstrap-Token). This lets the operator gate first-run setup.
 //   - Otherwise, POST is only allowed from localhost (x-real-ip / x-forwarded-for
 //     is 127.0.0.1 / ::1), which is the operator's terminal.
+// Loopback detection with normalization: Node reports IPv4 loopback as
+// "::ffff:127.0.0.1" (IPv6-mapped), which must also count as localhost.
+function isLoopback(addr: string): boolean {
+  const a = addr.trim().replace(/^::ffff:/i, "");
+  return a === "127.0.0.1" || a === "::1" || a === "localhost";
+}
+
 function isLocalhostRequest(req: Request): boolean {
   const real = req.headers.get("x-real-ip");
-  if (real && (real === "127.0.0.1" || real === "::1" || real === "localhost")) return true;
   const fwd = req.headers.get("x-forwarded-for");
-  if (fwd) {
-    const first = fwd.split(",")[0].trim();
-    if (first === "127.0.0.1" || first === "::1" || first === "localhost") return true;
-  }
+  // Direct connection without a reverse proxy: Next.js injects
+  // x-forwarded-for itself (e.g. "::ffff:127.0.0.1" for loopback).
+  // A proxy ALWAYS injects these headers, so operator setups resolve here.
+  if (!real && !fwd) return true;
+  if (real && isLoopback(real)) return true;
+  if (fwd && isLoopback(fwd.split(",")[0])) return true;
   return false;
 }
 
