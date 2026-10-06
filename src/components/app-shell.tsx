@@ -18,6 +18,9 @@ import {
   Command as CommandIcon,
   Lock as LockIcon,
   LockOpen,
+  Menu,
+  X,
+  ChevronLeft,
 } from "lucide-react";
 import { useAppStore, type View } from "@/lib/store";
 import { t } from "@/lib/i18n";
@@ -64,6 +67,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const navItems = getNavItems(locale);
   const visibleNavItems = navItems.filter((item) => !item.adminOnly || isAdmin);
   const [commandOpen, setCommandOpen] = React.useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = React.useState(false);
+  React.useEffect(() => { setMobileNavOpen(false); }, [view]);
 
   // Keyboard shortcut: Cmd+K (Mac) / Ctrl+K (Windows/Linux)
   React.useEffect(() => {
@@ -79,8 +84,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-screen flex-col bg-background">
-      <header className="sticky top-0 z-40 border-b bg-background/80 backdrop-blur-sm">
-        <div className="flex h-16 items-center gap-3 px-4 md:px-6">
+      <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-lg focus:bg-primary focus:p-3 focus:text-primary-foreground">{locale === "ru" ? "Перейти к содержимому" : "Skip to content"}</a>
+      <header className="sticky top-0 z-40 border-b bg-card/95 backdrop-blur-md">
+        <div className="flex min-h-16 flex-wrap items-center gap-2 px-3 py-2 md:gap-3 md:px-6">
+          <Button variant="ghost" size="icon" className="md:hidden" onClick={() => setMobileNavOpen(!mobileNavOpen)} aria-expanded={mobileNavOpen} aria-controls="mobile-navigation" aria-label={locale === "ru" ? "Открыть навигацию" : "Open navigation"}>{mobileNavOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}</Button>
           <button onClick={() => setView("dashboard")} className="flex items-center gap-2.5" aria-label={locale === "ru" ? "На главную" : "Go home"}>
             <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-medical-gradient text-white shadow-md shadow-teal-500/20 ring-1 ring-teal-500/30">
               <Stethoscope className="h-5 w-5" />
@@ -104,7 +111,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <CommandIcon className="h-2.5 w-2.5" />K
             </kbd>
           </button>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex flex-wrap items-center gap-1 md:gap-2">
             <E2EEStatusBadge />
             <DoctorProfileSwitcher />
             <NotificationsPanel />
@@ -126,8 +133,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </header>
 
       <div className="flex flex-1">
-        <aside className={cn("sticky top-16 hidden h-[calc(100vh-4rem)] shrink-0 border-r bg-sidebar md:block", sidebarCollapsed ? "w-16" : "w-60")}>
+        <aside className={cn("sticky top-16 hidden h-[calc(100vh-4rem)] shrink-0 border-r bg-sidebar md:block", sidebarCollapsed ? "w-16" : "w-64")}>
           <nav className="flex h-full flex-col p-2">
+            {!sidebarCollapsed && <p className="px-3 pb-3 pt-4 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">{locale === "ru" ? "Рабочее пространство" : "Workspace"}</p>}
             <div className="space-y-1">
               {visibleNavItems.map((item) => {
                 const Icon = item.icon;
@@ -141,10 +149,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                       active
                         ? item.adminOnly
                           ? "bg-amber-500/15 text-amber-700 dark:text-amber-400"
-                          : "bg-medical-gradient-soft text-primary font-semibold ring-1 ring-primary/25"
+                          : "bg-primary/10 text-primary font-semibold"
                         : "text-sidebar-foreground/80 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground",
 
                     )}
+                    aria-current={active ? "page" : undefined}
+                    aria-label={item.label}
                     title={item.description}
                   >
                     {active && !item.adminOnly && (
@@ -184,33 +194,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 className="flex w-full items-center justify-center rounded-lg p-2 text-muted-foreground hover:bg-sidebar-accent/50"
                 aria-label={t("nav.collapsePanel", locale)}
               >
-                <Activity className={cn("h-4 w-4 transition-transform", sidebarCollapsed && "rotate-180")} />
+                <ChevronLeft className={cn("h-4 w-4 transition-transform", sidebarCollapsed && "rotate-180")} />
               </button>
             </div>
           </nav>
         </aside>
 
-        <nav className="fixed bottom-0 left-0 right-0 z-40 flex border-t bg-background md:hidden">
-          {visibleNavItems.map((item) => {
-            const Icon = item.icon;
-            const active = view === item.id;
-            return (
-              <button
-                key={item.id}
-                onClick={() => setView(item.id)}
-                className={cn(
-                  "flex flex-1 flex-col items-center gap-0.5 py-2 text-[10px] font-medium",
-                  active ? (item.adminOnly ? "text-amber-600" : "text-primary") : "text-muted-foreground",
-                )}
-              >
-                <Icon className="h-5 w-5" />
-                <span className="truncate">{item.label.split(" ")[0]}</span>
-              </button>
-            );
-          })}
-        </nav>
+        {mobileNavOpen && (
+          <nav id="mobile-navigation" aria-label={locale === "ru" ? "Разделы приложения" : "App sections"} className="fixed inset-x-0 top-16 bottom-0 z-30 overflow-y-auto bg-card p-4 md:hidden">
+            {visibleNavItems.map((item) => {
+              const Icon = item.icon;
+              return <button key={item.id} onClick={() => { setView(item.id); setMobileNavOpen(false); }} aria-current={view === item.id ? "page" : undefined} className={cn("mb-1 flex min-h-12 w-full items-center gap-3 rounded-xl px-4 text-left text-sm", view === item.id ? "bg-primary/10 text-primary font-semibold" : "hover:bg-muted")}><Icon className="h-5 w-5" />{item.label}</button>;
+            })}
+          </nav>
+        )}
 
-        <main className="flex-1 overflow-x-hidden pb-16 md:pb-0">
+        <main id="main-content" tabIndex={-1} className="min-w-0 flex-1 overflow-x-hidden">
           <div className="mx-auto max-w-7xl px-4 py-6 md:px-6 md:py-8">
             {children}
           </div>
@@ -313,3 +312,4 @@ function E2EEStatusBadge() {
     </button>
   );
 }
+

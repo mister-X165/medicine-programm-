@@ -13,6 +13,7 @@
 //   - non-admin sessions must own the case (case.doctorId === session.doctorId)
 //   - non-admin sessions may also access cases that have been actively shared
 //     with them via CaseShare (status: "active", toDoctorId: session.doctorId)
+//     for read operations only; all mutations require owner/admin.
 //
 // Returns either `{ok: true, session}` (caller proceeds) or
 // `{ok: false, response}` (caller returns the response directly).
@@ -28,6 +29,7 @@ export type CaseAccessResult =
 export async function requireCaseAccess(
   caseId: string,
   req: Request,
+  permission: "read" | "edit" | "share" | "delete" = req.method === "GET" || req.method === "HEAD" ? "read" : "edit",
 ): Promise<CaseAccessResult> {
   const session = await getSessionFromRequest(req);
   if (!session) {
@@ -61,7 +63,8 @@ export async function requireCaseAccess(
     const share = await db.caseShare.findFirst({
       where: { caseId, toDoctorId: session.doctorId, status: "active" },
     });
-    if (!share) {
+    // Current shares grant read/comment only; mutations remain owner/admin only.
+    if (!share || permission !== "read") {
       return {
         ok: false,
         response: NextResponse.json(
@@ -74,3 +77,4 @@ export async function requireCaseAccess(
 
   return { ok: true, session };
 }
+

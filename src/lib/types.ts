@@ -169,6 +169,7 @@ export interface MonitoringMarker {
 
 /** Отчёт самопроверки ИИ (verification pass). */
 export interface VerificationReport {
+  failureReason?: string;
   /** Выполнялась ли самопроверка. */
   performed: boolean;
   /** Число проходов проверки. */
@@ -250,6 +251,7 @@ export interface DDxTherapyOption {
 
 /** Полный ответ эндпоинта дифференциальной диагностики. */
 export interface DDxResponse {
+  generalSources?: Array<{ title: string; url: string; source: string }>;
   diagnoses: DDxHypothesis[];
   /** План дообследования, закрывающий все гипотезы (сводный). */
   workupPlan: WorkupItem[];
@@ -931,3 +933,4 @@ export interface MkbRefItem {
   IsGroup: boolean;
   treeLevel: number;
 }
+

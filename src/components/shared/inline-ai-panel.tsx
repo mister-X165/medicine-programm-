@@ -364,16 +364,25 @@ export function InlineAiPanel({ patientId, patientName, patientContext }: Inline
                   {ddxMut.data.clinrecSummary && (
                     <div className="flex items-center gap-1.5 rounded-md border border-teal-500/30 bg-teal-500/10 px-2 py-1.5 text-[10px] font-medium text-teal-700 dark:text-teal-400">
                       <Landmark className="h-3 w-3 shrink-0" />
-                      {ddxMut.data.clinrecSummary.matched} из {ddxMut.data.clinrecSummary.total} гипотез подтверждены официальными КР Минздрава РФ
+                      {ddxMut.data.clinrecSummary.matched} из {ddxMut.data.clinrecSummary.total} гипотез: найдены КР Минздрава РФ по теме
                       {ddxMut.data.clinrecSummary.internationalCount ? ` · ${ddxMut.data.clinrecSummary.internationalCount} междунар. источников` : ""}
                     </div>
+                  )}
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    Черновик ИИ. Проценты — ориентировочная оценка модели, не клиническая вероятность.
+                    Найденные рекомендации не подтверждают диагноз. Требуется проверка врачом.
+                  </p>
+                  {ddxMut.data.verification?.failureReason && (
+                    <p role="status" className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs">
+                      {ddxMut.data.verification.failureReason}
+                    </p>
                   )}
                   {/* Отчёт самопроверки (глубокий анализ) */}
                   {ddxMut.data.verification?.performed && (
                     <div className="rounded-md border border-indigo-500/30 bg-indigo-500/5 px-2 py-1.5 text-[10px] text-indigo-700 dark:text-indigo-300">
                       <div className="flex items-center gap-1.5 font-medium">
                         <ShieldCheck className="h-3 w-3 shrink-0" />
-                        Глубокий анализ: самопроверка выполнена ({ddxMut.data.verification.passes} прох.)
+                        Самопроверка моделью выполнена ({ddxMut.data.verification.passes} прох.)
                         {ddxMut.data.verification.corrections.length > 0 && (
                           <span>· исправлено: {ddxMut.data.verification.corrections.length}</span>
                         )}
@@ -386,6 +395,17 @@ export function InlineAiPanel({ patientId, patientName, patientContext }: Inline
                         </ul>
                       )}
                     </div>
+                  )}
+                  {!!ddxMut.data.generalSources?.length && (
+                    <details className="rounded-lg border p-3 text-xs">
+                      <summary className="cursor-pointer font-medium">Источники по случаю ({ddxMut.data.generalSources.length})</summary>
+                      <p className="my-2 text-muted-foreground">Общие результаты поиска, без подтверждённой связи с отдельным диагнозом.</p>
+                      <ul className="space-y-2">
+                        {ddxMut.data.generalSources.map((source, index) => (
+                          <li key={index}><a className="text-primary underline underline-offset-4" href={source.url} target="_blank" rel="noopener noreferrer">{source.title}</a> · {source.source}</li>
+                        ))}
+                      </ul>
+                    </details>
                   )}
                   {/* Гипотезы дифференциального диагноза */}
                   {ddxMut.data.diagnoses.map((d, i) => {
@@ -696,3 +716,4 @@ function MessageSquare({ className }: { className?: string }) {
     </svg>
   );
 }
+

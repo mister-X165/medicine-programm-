@@ -132,8 +132,8 @@ export async function verifyDraftText(params: {
   const { corrections, cleaned } = extractVerificationReportFromText(corrected);
   verification.corrections = corrections;
   verification.performed = verification.passes > 0;
-  verification.factsGrounded =
-    !cleaned.toLowerCase().includes("выявлено") || corrections.length === 0;
+  // Model self-review does not establish grounding in patient data.
+  verification.factsGrounded = undefined;
   verification.verifiedAt = new Date().toISOString();
 
   logger.info(logTag, "Глубокий анализ: самопроверка завершена", {
@@ -143,3 +143,4 @@ export async function verifyDraftText(params: {
 
   return { text: cleaned, verification };
 }
+

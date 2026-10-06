@@ -25,6 +25,7 @@
 // аудита (AI_SELF_VERIFY_PASSES, по умолчанию 2) → финальный ответ + отчёт
 // самопроверки. Ответ соответствует типу DDxResponse (lib/types.ts).
 import { NextResponse } from "next/server";
+import { ddxAuditSchema } from "@/lib/ddx-validation";
 import { llmChat, parseJSON } from "@/lib/ai-service";
 import { requireAuth } from "@/lib/auth";
 import { deidentifyText } from "@/lib/deidentify";
@@ -310,15 +311,6 @@ export async function POST(req: Request) {
 
   const toRef = (r: IntlRagResult) => ({ title: r.title.slice(0, 250), url: r.url, source: r.source });
 
-  // Тематическая привязка международных результатов к гипотезам
-  const intlByHypo: Array<Array<{ title: string; url: string; source: string }>> = hypotheses.map(
-    (h) => {
-      const key = (h.diagnosis || "").toLowerCase().split(/\s+/).filter((w) => w.length > 4)[0] ?? "";
-      const direct = intlResults.filter((r) => key && r.title.toLowerCase().includes(key.slice(0, 12)));
-      return (direct.length ? direct : intlResults).slice(0, 3).map(toRef);
-    },
-  );
-
   // ─── 5. ГЛУБОКИЙ АНАЛИЗ: многопроходная самопроверка (черновик→аудит) ──
   const draftJson = JSON.stringify({ diagnoses: hypotheses, workupPlan, therapyOptions });
 
@@ -358,11 +350,17 @@ export async function POST(req: Request) {
   }
 
   // Парсим финальную версию; при сбое аудита — остаёмся на нормализованном черновике
-  const finalParsed = parseJSON<RawDraft>(finalText);
-  const finalDiagnoses: Hypo[] =
-    finalParsed?.diagnoses && finalParsed.diagnoses.length >= 3
-      ? normalize(finalParsed.diagnoses)
-      : hypotheses;
+  const parsedAudit = parseJSON<RawDraft>(finalText);
+  const auditResult = ddxAuditSchema.safeParse(parsedAudit);
+  const auditValid = auditResult.success;
+  if (passes > 0 && !auditValid) {
+    verification = {
+      ...verification, performed: false, factsGrounded: false,
+      failureReason: "Ответ самопроверки имеет неверный формат. Показан исходный черновик ИИ.",
+    };
+  }
+  const finalParsed = auditResult.success ? auditResult.data : null;
+  const finalDiagnoses: Hypo[] = finalParsed ? normalize(finalParsed.diagnoses!) : hypotheses;
 
   const finalWorkupPlan: WorkupItem[] =
     finalParsed?.workupPlan && finalParsed.workupPlan.length
@@ -390,20 +388,7 @@ export async function POST(req: Request) {
 
   // Матчинг КР пересобираем под финальные названия гипотез (кеш minzdrav-cr)
   const finalClinrec: Array<ClinrecMatch | null> = await Promise.all(
-    finalDiagnoses.map(async (h, i) => {
-      const prev = clinrecByHypo[i];
-      if (
-        prev &&
-        prev.name &&
-        h.diagnosis &&
-        (prev.name.toLowerCase().includes(h.diagnosis.toLowerCase().slice(0, 15)) ||
-          h.diagnosis.toLowerCase().includes(prev.name.toLowerCase().slice(0, 15)))
-      ) {
-        return prev;
-      }
-      const fresh = await matchClinrec(h);
-      return fresh ?? prev ?? null;
-    }),
+    finalDiagnoses.map(matchClinrec),
   );
 
   const confirmedCount = finalClinrec.filter(Boolean).length;
@@ -445,14 +430,14 @@ export async function POST(req: Request) {
                   : ("name" as const),
             }
           : null,
-        intlSources:
-          intlByHypo[i] ??
-          (finalDiagnoses.length <= hypotheses.length ? [] : intlResults.slice(0, 3).map(toRef)),
+        // Search results concern the overall case; no diagnosis attribution is proven.
+        intlSources: [],
       };
     }),
     workupPlan: finalWorkupPlan,
     therapyOptions: finalTherapy,
     verification,
+    generalSources: intlResults.map(toRef),
     clinrecSummary: {
       matched: confirmedCount,
       total: finalDiagnoses.length,
@@ -465,3 +450,4 @@ export async function POST(req: Request) {
 
   return NextResponse.json(response);
 }
+

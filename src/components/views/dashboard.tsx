@@ -113,7 +113,7 @@ const itemVariants: Variants = {
 };
 
 export function Dashboard() {
-  // NOTE: selectPatient was added in v2.5.0 to navigate into the EMR medical-record view.
+  // NOTE: selectPatient was added in Рабочее пространство to navigate into the EMR medical-record view.
   const { selectCase, selectPatient, currentDoctor } = useAppStore();
   const qc = useQueryClient();
   const [createOpen, setCreateOpen] = React.useState(false);
@@ -132,13 +132,13 @@ export function Dashboard() {
     refetchInterval: 30000,
   });
 
-  // EMR v2.5.0 — active patients for the "Активные пациенты" KPI.
+  // EMR Рабочее пространство — active patients for the "Активные пациенты" KPI.
   const { data: activePatientsData, isLoading: patientsLoading } = useQuery({
     queryKey: ["patients", { status: "active" }],
     queryFn: () => api.getPatients({ status: "active" }),
   });
 
-  // EMR v2.5.0 — recent patients (any status) for the "Недавние пациенты" panel.
+  // EMR Рабочее пространство — recent patients (any status) for the "Недавние пациенты" panel.
   const { data: recentPatientsData, isLoading: recentLoading } = useQuery({
     queryKey: ["patients", "recent"],
     queryFn: () => api.getPatients(),
@@ -246,7 +246,7 @@ export function Dashboard() {
             label="Активные пациенты"
             value={patientsLoading ? undefined : activePatientCount}
             gradient="emerald"
-            trend={activePatientCount > 0 ? "EMR v2.5.0" : "EMR активна"}
+            trend={activePatientCount > 0 ? "EMR Рабочее пространство" : "EMR активна"}
             accent={<TrendUpPill text="+2 за неделю" tone="emerald" />}
           />
         </motion.div>
@@ -374,7 +374,7 @@ export function Dashboard() {
                 </div>
                 <Badge variant="secondary" className="tabular-nums">{recentPatients.length}</Badge>
               </div>
-              <p className="text-sm text-muted-foreground">Последние обновлённые медицинские карты (EMR v2.5.0)</p>
+              <p className="text-sm text-muted-foreground">Последние обновлённые медицинские карты (EMR Рабочее пространство)</p>
             </CardHeader>
             <CardContent>
               {recentLoading ? (
@@ -428,15 +428,7 @@ export function Dashboard() {
 // ─── Hero / investor-ready header ──────────────────────────────────────────
 function HeroHeader({ currentDoctor, onCreate }: { currentDoctor: { fullName: string } | null; onCreate: () => void }) {
   return (
-    <div className="relative overflow-hidden rounded-2xl border border-emerald-500/20 bg-gradient-to-br from-emerald-500/10 via-teal-500/10 to-cyan-500/10 p-5 sm:p-6">
-      {/* Decorative gradient orbs (emerald/teal/cyan — NO indigo/blue) */}
-      <div className="pointer-events-none absolute -right-16 -top-16 h-48 w-48 rounded-full bg-emerald-500/15 blur-3xl" />
-      <div className="pointer-events-none absolute -bottom-20 -left-20 h-40 w-40 rounded-full bg-teal-500/10 blur-3xl" />
-      {/* Large stethoscope watermark */}
-      <div className="pointer-events-none absolute -right-4 top-2 opacity-[0.07]">
-        <Stethoscope className="h-40 w-40 text-emerald-700 dark:text-emerald-300" />
-      </div>
-
+    <div className="relative overflow-hidden rounded-2xl border bg-card p-6 sm:p-8">
       <div className="relative flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="space-y-3">
           {/* Logo + version + compliance badges */}
@@ -449,7 +441,7 @@ function HeroHeader({ currentDoctor, onCreate }: { currentDoctor: { fullName: st
             </div>
             <Badge variant="outline" className="gap-1 border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">
               <Sparkles className="h-3 w-3" />
-              v2.5.0
+              Рабочее пространство
             </Badge>
             <Badge variant="outline" className="gap-1 border-teal-500/30 bg-teal-500/10 text-teal-700 dark:text-teal-300">
               <ShieldCheck className="h-3 w-3" />
@@ -462,7 +454,7 @@ function HeroHeader({ currentDoctor, onCreate }: { currentDoctor: { fullName: st
             <h1 className="text-2xl font-bold tracking-tight md:text-3xl">
               {currentDoctor ? `Здравствуйте, ${currentDoctor.fullName.split(" ")[1] ?? currentDoctor.fullName}` : "Рабочий стол врача"}
             </h1>
-            <p className="text-sm text-muted-foreground">Мультимодальный анализ данных пациента с генетическим профилем и объяснимыми рекомендациями</p>
+            <p className="text-sm text-muted-foreground">Пациенты, клинические случаи и ближайшие действия в одном рабочем пространстве</p>
           </div>
         </div>
 
@@ -1072,3 +1064,4 @@ function CreateCaseDialog({ onSubmit, loading }: { onSubmit: (data: { birthYear?
     </DialogContent>
   );
 }
+

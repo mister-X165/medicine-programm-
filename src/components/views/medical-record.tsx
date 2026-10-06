@@ -811,7 +811,7 @@ function PatientDetailWorkspace({ patientId, onBack }: { patientId: string; onBa
       p.smokingStatus ? `Курение: ${p.smokingStatus}` : "Курение: данных нет",
       p.alcoholUse ? `Алкоголь: ${p.alcoholUse}` : "Алкоголь: данных нет",
       p.occupation ? `Профессия: ${p.occupation}` : "",
-      p.allergies?.length ? `Аллергоанамнез: ${p.allergies.map((a) => `${a.allergen}${a.reaction ? ` — ${a.reaction}` : ""}`).join("; ")}` : "Аллергоанамнез: не отягощён (по данным карты)",
+      p.allergies?.length ? `Аллергоанамнез: ${p.allergies.map((a) => `${a.allergen}${a.reaction ? ` — ${a.reaction}` : ""}`).join("; ")}` : "Аллергоанамнез: данных нет",
       p.chronicDiseases?.length ? `Хронические заболевания: ${p.chronicDiseases.map((c) => `${c.name}${c.icd10 ? ` (${c.icd10})` : ""}`).join("; ")}` : "Хронические заболевания: по карте не указаны",
       p.familyHistory?.length ? `Наследственный анамнез: ${p.familyHistory.map((f) => `${f.relation}: ${f.condition}`).join("; ")}` : "Наследственный анамнез: данных нет",
       (p.visits ?? []).slice(-3).map((v) => `Визит ${v.completedAt?.slice(0, 10) ?? v.scheduledAt?.slice(0, 10) ?? ""}: ${v.chiefComplaint || v.visitReason || ""}`).filter((s) => s.trim().length > 8).join("; "),
@@ -4613,3 +4613,4 @@ function CreateCarePlanDialog({
     </Dialog>
   );
 }
+
