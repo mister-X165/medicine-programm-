@@ -770,13 +770,58 @@ function PatientDetailWorkspace({ patientId, onBack }: { patientId: string; onBa
 
   const p = data.patient;
 
-  // Build AI patient context
+  // Build AI patient context — v5.2: передаём ИИ РЕАЛЬНЫЕ данные карты
+  // (анамнез жизни, вредные привычки, аллергии, наследственность, жалобы,
+  // витальные показатели, анализы и обследования). Раньше контекст был бедным,
+  // и модель «додумывала» отсутствующие факты (например, курение при «не курит»).
+  const fmtLabs = (p: NonNullable<typeof data.patient>) =>
+    (p.labResults ?? [])
+      .slice(-30)
+      .map((l) => {
+        const norm =
+          l.refRangeLow != null || l.refRangeHigh != null
+            ? ` (норма ${l.refRangeLow ?? ""}-${l.refRangeHigh ?? ""})`
+            : "";
+        return `${l.testName} ${l.value}${l.unit ? " " + l.unit : ""}${norm}${l.flag && l.flag !== "normal" ? ` [${l.flag}]` : ""}`;
+      })
+      .join("; ");
+  const fmtExams = (p: NonNullable<typeof data.patient>) =>
+    (p.examinations ?? [])
+      .filter((e) => e.status === "completed")
+      .slice(-15)
+      .map((e) => {
+        const params = (e.resultData ?? []).map((r) => `${r.parameter}: ${r.value}${r.unit ? ` ${r.unit}` : ""}`).join(", ");
+        return `${e.name}${params ? ` — ${params}` : ""}${e.conclusion ? `; заключение: ${e.conclusion}` : ""}`;
+      })
+      .join("; ");
+  const fmtVitals = (p: NonNullable<typeof data.patient>) =>
+    (p.vitalSigns ?? [])
+      .slice(-5)
+      .map((v) => `${v.recordedAt?.slice(0, 10) ?? ""} ЧСС ${v.heartRate ?? "—"}, АД ${v.systolicBP ?? "—"}/${v.diastolicBP ?? "—"}, SpO2 ${v.oxygenSaturation ?? "—"}%, t° ${v.temperature ?? "—"}°C, ЧДД ${v.respiratoryRate ?? "—"}, рост ${v.height ?? "—"} см, вес ${v.weight ?? "—"} кг, ИМТ ${v.bmi ?? "—"}`)
+      .join("; ");
+
   const aiContext = {
     age: p.birthDate ? Math.floor((Date.now() - new Date(p.birthDate).getTime()) / (365.25 * 24 * 60 * 60 * 1000)) : undefined,
     sex: p.sex || undefined,
     problems: p.problems?.filter(pr => pr.status === "active").map(pr => pr.title) ?? [],
     medications: p.medications?.filter(m => m.status === "active").map(m => m.drugName) ?? [],
     allergies: p.allergies?.map(a => a.allergen) ?? [],
+    // v5.2 — строковые блоки для диф. диагноза (см. api.differentialDiagnosis)
+    history: [
+      p.smokingStatus ? `Курение: ${p.smokingStatus}` : "Курение: данных нет",
+      p.alcoholUse ? `Алкоголь: ${p.alcoholUse}` : "Алкоголь: данных нет",
+      p.occupation ? `Профессия: ${p.occupation}` : "",
+      p.allergies?.length ? `Аллергоанамнез: ${p.allergies.map((a) => `${a.allergen}${a.reaction ? ` — ${a.reaction}` : ""}`).join("; ")}` : "Аллергоанамнез: не отягощён (по данным карты)",
+      p.chronicDiseases?.length ? `Хронические заболевания: ${p.chronicDiseases.map((c) => `${c.name}${c.icd10 ? ` (${c.icd10})` : ""}`).join("; ")}` : "Хронические заболевания: по карте не указаны",
+      p.familyHistory?.length ? `Наследственный анамнез: ${p.familyHistory.map((f) => `${f.relation}: ${f.condition}`).join("; ")}` : "Наследственный анамнез: данных нет",
+      (p.visits ?? []).slice(-3).map((v) => `Визит ${v.completedAt?.slice(0, 10) ?? v.scheduledAt?.slice(0, 10) ?? ""}: ${v.chiefComplaint || v.visitReason || ""}`).filter((s) => s.trim().length > 8).join("; "),
+      p.notes ? `Заметки врача: ${p.notes}` : "",
+    ].filter(Boolean).join("\n"),
+    examiners: [
+      fmtVitals(p) && `Витальные показатели: ${fmtVitals(p)}`,
+      fmtLabs(p) && `Анализы: ${fmtLabs(p)}`,
+      fmtExams(p) && `Обследования: ${fmtExams(p)}`,
+    ].filter(Boolean).join("\n"),
   };
   const patientName = [p.lastName, p.firstName, p.middleName].filter(Boolean).join(" ") || p.patientToken;
 

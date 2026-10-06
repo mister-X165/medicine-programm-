@@ -1520,37 +1520,17 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
-  // v4.0: Differential diagnosis
+  // v5.2: Differential diagnosis — несколько гипотез с аргументами ЗА/ПРОТИВ,
+  // план дообследования, условные опции терапии, самопроверка ИИ,
+  // КР Минздрава РФ + международные источники (см. DDxResponse в lib/types)
   differentialDiagnosis: (data: {
     symptoms: string;
     age?: number;
     sex?: string;
     history?: string;
+    examiners?: string;
   }) =>
-    fetchJSON<{
-      diagnoses: Array<{
-        diagnosis: string;
-        icd10: string;
-        probability: number;
-        rationale: string;
-        redFlags?: string;
-        workup?: string[];
-        clinrec?: {
-          codeVersion: string;
-          name: string;
-          mkbString: string;
-          url: string;
-          pdfUrl: string;
-          npcApproved: boolean;
-          ageCategory: string;
-          developers: string[];
-          publishDate: string | null;
-          matchType: "name" | "mkb";
-        } | null;
-      }>;
-      clinrecSummary?: { matched: number; total: number; source: string };
-      provider?: string;
-    }>(`${API_BASE}/ai/differential-diagnosis`, {
+    fetchJSON<import("./types").DDxResponse>(`${API_BASE}/ai/differential-diagnosis`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),

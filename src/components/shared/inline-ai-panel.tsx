@@ -32,6 +32,11 @@ import {
   Landmark,
   ListChecks,
   ExternalLink,
+  ThumbsUp,
+  ThumbsDown,
+  Globe2,
+  ShieldCheck,
+  ShieldAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -51,6 +56,9 @@ interface InlineAiPanelProps {
     problems?: string[];
     medications?: string[];
     allergies?: string[];
+    /** v5.2: анамнез и обследования — передаются в диф. диагноз как фактические данные */
+    history?: string;
+    examiners?: string;
   };
 }
 
@@ -77,6 +85,8 @@ export function InlineAiPanel({ patientId, patientName, patientContext }: Inline
   const [chatMsgs, setChatMsgs] = React.useState<ChatMsg[]>([]);
   const [chatInput, setChatInput] = React.useState("");
   const [ddxInput, setDdxInput] = React.useState("");
+  // v5.2: оценка врачом каждой гипотезы — согласен / не согласен
+  const [ddxVotes, setDdxVotes] = React.useState<Record<number, "agree" | "disagree" | null>>({});
   const [labInput, setLabInput] = React.useState("");
   const [drugInput, setDrugInput] = React.useState("");
   const scrollRef = React.useRef<HTMLDivElement>(null);
@@ -112,15 +122,26 @@ export function InlineAiPanel({ patientId, patientName, patientContext }: Inline
     onError: (e: Error) => toast.error("Ошибка ИИ", { description: e.message }),
   });
 
-  // DDx mutation
+  // DDx mutation — v5.2: вместе с симптомами передаём анамнез и обследования,
+  // чтобы ИИ аргументировал гипотезы реальными данными, а не домысливал их
   const ddxMut = useMutation({
     mutationFn: () =>
       api.differentialDiagnosis({
         symptoms: ddxInput.trim(),
         age: patientContext?.age,
         sex: patientContext?.sex,
+        history: patientContext?.history,
+        examiners: patientContext?.examiners,
       }),
-    onSuccess: () => toast.success("Диф. диагноз готов"),
+    onSuccess: (res) => {
+      if (res.error) toast.error("Диф. диагноз", { description: res.error });
+      else if ((res.diagnoses?.length ?? 0) > 0) {
+        toast.success(
+          `Диф. диагноз готов: ${res.diagnoses.length} гипотез` +
+            (res.verification?.performed ? ` · самопроверка: ${res.verification.passes} прох.` : ""),
+        );
+      } else toast.error("ИИ не вернул гипотез", { description: res.raw?.slice(0, 200) });
+    },
     onError: (e: Error) => toast.error("Ошибка анализа", { description: e.message }),
   });
 
@@ -314,16 +335,17 @@ export function InlineAiPanel({ patientId, patientName, patientContext }: Inline
           </div>
         </TabsContent>
 
-        {/* DDx module */}
+        {/* DDx module — v5.2: гипотезы с аргументами ЗА/ПРОТИВ, оценка врача,
+            план дообследования, условные опции терапии, самопроверка ИИ */}
         <TabsContent value="ddx" className="flex-1 flex flex-col overflow-hidden m-0 mt-0">
           <ScrollArea className="flex-1">
             <div className="p-3 space-y-3">
               <div>
-                <label className="text-[10px] font-medium text-muted-foreground">Симптомы</label>
+                <label className="text-[10px] font-medium text-muted-foreground">Симптомы и данные</label>
                 <Textarea
                   value={ddxInput}
                   onChange={(e) => setDdxInput(e.target.value)}
-                  placeholder="Опишите симптомы пациента…"
+                  placeholder="Опишите симптомы пациента… (анамнез и обследования из карты передаются автоматически)"
                   className="mt-1 min-h-[80px] text-xs"
                 />
               </div>
@@ -334,53 +356,221 @@ export function InlineAiPanel({ patientId, patientName, patientContext }: Inline
                 disabled={!ddxInput.trim() || ddxMut.isPending}
               >
                 {ddxMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Brain className="h-3.5 w-3.5" />}
-                Анализировать
+                {ddxMut.isPending ? "Глубокий анализ (черновик → самопроверка)…" : "Анализировать"}
               </Button>
               {ddxMut.data?.diagnoses && (
                 <div className="space-y-2">
-                  {ddxMut.data.clinrecSummary && ddxMut.data.clinrecSummary.matched > 0 && (
+                  {/* Сводка по источникам: КР Минздрава + международные */}
+                  {ddxMut.data.clinrecSummary && (
                     <div className="flex items-center gap-1.5 rounded-md border border-teal-500/30 bg-teal-500/10 px-2 py-1.5 text-[10px] font-medium text-teal-700 dark:text-teal-400">
                       <Landmark className="h-3 w-3 shrink-0" />
-                      {ddxMut.data.clinrecSummary.matched} из {ddxMut.data.clinrecSummary.total} диагнозов подтверждены официальными КР Минздрава РФ
+                      {ddxMut.data.clinrecSummary.matched} из {ddxMut.data.clinrecSummary.total} гипотез подтверждены официальными КР Минздрава РФ
+                      {ddxMut.data.clinrecSummary.internationalCount ? ` · ${ddxMut.data.clinrecSummary.internationalCount} междунар. источников` : ""}
                     </div>
                   )}
-                  {ddxMut.data.diagnoses.map((d, i) => (
-                    <div key={i} className="rounded-md border border-border bg-muted/30 p-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-medium">{i + 1}. {d.diagnosis}</span>
-                        <Badge variant="outline" className="text-[9px] shrink-0">{Math.round(d.probability * 100)}%</Badge>
-                      </div>
-                      <div className="mt-0.5 flex flex-wrap items-center gap-1">
-                        {d.icd10 && <span className="text-[10px] text-muted-foreground">МКБ-10: {d.icd10}</span>}
-                        {d.clinrec && (
-                          <a
-                            href={d.clinrec.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-0.5 rounded border border-teal-500/40 bg-teal-500/10 px-1.5 py-0.5 text-[9px] font-medium text-teal-700 transition-colors hover:bg-teal-500/20 dark:text-teal-400"
-                            title={`КР Минздрава РФ: ${d.clinrec.name}${d.clinrec.npcApproved ? " (одобрена НПС)" : ""}`}
-                          >
-                            <Landmark className="h-2.5 w-2.5" />
-                            КР Минздрава {d.clinrec.codeVersion}
-                            <ExternalLink className="h-2.5 w-2.5" />
-                          </a>
+                  {/* Отчёт самопроверки (глубокий анализ) */}
+                  {ddxMut.data.verification?.performed && (
+                    <div className="rounded-md border border-indigo-500/30 bg-indigo-500/5 px-2 py-1.5 text-[10px] text-indigo-700 dark:text-indigo-300">
+                      <div className="flex items-center gap-1.5 font-medium">
+                        <ShieldCheck className="h-3 w-3 shrink-0" />
+                        Глубокий анализ: самопроверка выполнена ({ddxMut.data.verification.passes} прох.)
+                        {ddxMut.data.verification.corrections.length > 0 && (
+                          <span>· исправлено: {ddxMut.data.verification.corrections.length}</span>
                         )}
                       </div>
-                      <p className="mt-0.5 text-[10px] text-muted-foreground">{d.rationale}</p>
-                      {d.redFlags && (
-                        <div className="mt-1 flex items-start gap-1 rounded bg-amber-500/10 px-1.5 py-1 text-[10px] text-amber-700 dark:text-amber-400">
-                          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-                          <span><strong>Red flags:</strong> {d.redFlags}</span>
-                        </div>
-                      )}
-                      {d.workup && d.workup.length > 0 && (
-                        <div className="mt-1 flex items-start gap-1 text-[10px] text-muted-foreground">
-                          <ListChecks className="mt-0.5 h-3 w-3 shrink-0 text-primary" />
-                          <span><strong>Обследование:</strong> {d.workup.join("; ")}</span>
-                        </div>
+                      {ddxMut.data.verification.corrections.length > 0 && (
+                        <ul className="mt-1 list-disc pl-4 space-y-0.5 text-[9px] leading-snug">
+                          {ddxMut.data.verification.corrections.slice(0, 4).map((c, j) => (
+                            <li key={j}>{c}</li>
+                          ))}
+                        </ul>
                       )}
                     </div>
-                  ))}
+                  )}
+                  {/* Гипотезы дифференциального диагноза */}
+                  {ddxMut.data.diagnoses.map((d, i) => {
+                    const vote = ddxVotes[i];
+                    return (
+                      <div key={i} className="rounded-md border border-border bg-muted/30 p-2 space-y-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-medium">{i + 1}. {d.diagnosis}</span>
+                          <Badge variant="outline" className="text-[9px] shrink-0">{Math.round(d.probability * 100)}%</Badge>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1">
+                          {d.icd10 && <span className="text-[10px] text-muted-foreground">МКБ-10: {d.icd10}</span>}
+                          {d.clinrec && (
+                            <a
+                              href={d.clinrec.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-0.5 rounded border border-teal-500/40 bg-teal-500/10 px-1.5 py-0.5 text-[9px] font-medium text-teal-700 transition-colors hover:bg-teal-500/20 dark:text-teal-400"
+                              title={`КР Минздрава РФ: ${d.clinrec.name}${d.clinrec.npcApproved ? " (одобрена НПС)" : ""}`}
+                            >
+                              <Landmark className="h-2.5 w-2.5" />
+                              КР Минздрава {d.clinrec.codeVersion}
+                              <ExternalLink className="h-2.5 w-2.5" />
+                            </a>
+                          )}
+                          {(d.intlSources?.length ?? 0) > 0 && (
+                            <span className="inline-flex items-center gap-0.5 rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[9px] font-medium text-sky-700 dark:text-sky-400" title="Авторитетные международные источники (PubMed, ВОЗ, NICE, Cochrane…)">
+                              <Globe2 className="h-2.5 w-2.5" />
+                              {d.intlSources!.length} междунар.
+                            </span>
+                          )}
+                        </div>
+                        {/* Аргументы ЗА / ПРОТИВ — отдельно, как требует врач */}
+                        <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                          <div className="rounded bg-emerald-500/10 px-1.5 py-1">
+                            <div className="flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-400">
+                              <ThumbsUp className="h-2.5 w-2.5" /> Аргументы за
+                            </div>
+                            <ul className="mt-0.5 list-disc pl-3 text-[10px] leading-snug text-foreground/90">
+                              {(d.argumentsFor?.length ? d.argumentsFor : ["—"]).map((a, j) => <li key={j}>{a}</li>)}
+                            </ul>
+                          </div>
+                          <div className="rounded bg-rose-500/10 px-1.5 py-1">
+                            <div className="flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wide text-rose-700 dark:text-rose-400">
+                              <ThumbsDown className="h-2.5 w-2.5" /> Аргументы против
+                            </div>
+                            <ul className="mt-0.5 list-disc pl-3 text-[10px] leading-snug text-foreground/90">
+                              {(d.argumentsAgainst?.length ? d.argumentsAgainst : ["—"]).map((a, j) => <li key={j}>{a}</li>)}
+                            </ul>
+                          </div>
+                        </div>
+                        {d.differentiator && (
+                          <p className="text-[10px] text-muted-foreground"><strong>Чем различить:</strong> {d.differentiator}</p>
+                        )}
+                        {d.rationale && (
+                          <p className="text-[10px] text-muted-foreground">{d.rationale}</p>
+                        )}
+                        {d.redFlags && d.redFlags.length > 0 && (
+                          <div className="flex items-start gap-1 rounded bg-amber-500/10 px-1.5 py-1 text-[10px] text-amber-700 dark:text-amber-400">
+                            <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                            <span><strong>Red flags:</strong> {d.redFlags.join("; ")}</span>
+                          </div>
+                        )}
+                        {d.workup && d.workup.length > 0 && (
+                          <div className="flex items-start gap-1 text-[10px] text-muted-foreground">
+                            <ListChecks className="mt-0.5 h-3 w-3 shrink-0 text-primary" />
+                            <span><strong>Для подтверждения:</strong> {d.workup.join("; ")}</span>
+                          </div>
+                        )}
+                        {/* Международные источники по гипотезе */}
+                        {(d.intlSources?.length ?? 0) > 0 && (
+                          <div className="space-y-0.5 border-t border-border/50 pt-1">
+                            {d.intlSources!.slice(0, 3).map((s, j) => (
+                              <a
+                                key={j}
+                                href={s.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center gap-1 text-[9px] text-sky-600 hover:underline dark:text-sky-400"
+                                title={s.title}
+                              >
+                                <Globe2 className="h-2.5 w-2.5 shrink-0" />
+                                <span className="truncate">{s.source}: {s.title}</span>
+                              </a>
+                            ))}
+                          </div>
+                        )}
+                        {/* Оценка врачом: согласен / не согласен */}
+                        <div className="flex items-center gap-1 border-t border-border/50 pt-1">
+                          <span className="text-[9px] text-muted-foreground mr-1">Ваша оценка:</span>
+                          <button
+                            type="button"
+                            onClick={() => setDdxVotes((v) => ({ ...v, [i]: v[i] === "agree" ? null : "agree" }))}
+                            className={cn(
+                              "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[9px] font-medium transition-colors",
+                              vote === "agree"
+                                ? "border-emerald-500 bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+                                : "border-border text-muted-foreground hover:border-emerald-400 hover:text-emerald-600",
+                            )}
+                          >
+                            <ThumbsUp className="h-2.5 w-2.5" /> Согласен
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setDdxVotes((v) => ({ ...v, [i]: v[i] === "disagree" ? null : "disagree" }))}
+                            className={cn(
+                              "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[9px] font-medium transition-colors",
+                              vote === "disagree"
+                                ? "border-rose-500 bg-rose-500/15 text-rose-700 dark:text-rose-400"
+                                : "border-border text-muted-foreground hover:border-rose-400 hover:text-rose-600",
+                            )}
+                          >
+                            <ThumbsDown className="h-2.5 w-2.5" /> Не согласен
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {/* Сводный план дообследования — сначала обследование, потом лечение */}
+                  {(ddxMut.data.workupPlan?.length ?? 0) > 0 && (
+                    <div className="rounded-md border border-primary/30 bg-primary/5 p-2">
+                      <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-primary">
+                        <ListChecks className="h-3 w-3" /> План дообследования
+                      </div>
+                      <ul className="mt-1 space-y-1">
+                        {ddxMut.data.workupPlan.map((w, j) => (
+                          <li key={j} className="flex items-start gap-1.5 text-[10px]">
+                            <Badge
+                              variant="outline"
+                              className={cn(
+                                "shrink-0 text-[8px] px-1 py-0",
+                                w.priority === "urgent" && "border-rose-400 text-rose-600",
+                                w.priority === "high" && "border-amber-400 text-amber-600",
+                                w.priority === "routine" && "text-muted-foreground",
+                              )}
+                            >
+                              {w.priority === "urgent" ? "срочно" : w.priority === "high" ? "высокий" : "планово"}
+                            </Badge>
+                            <span>
+                              <strong>{w.name}</strong>
+                              {w.purpose && <span className="text-muted-foreground"> — {w.purpose}</span>}
+                              {w.targetDx && <span className="text-muted-foreground"> ({w.targetDx})</span>}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {/* Опции терапии — только «если подтверждён диагноз», с обоснованиями */}
+                  {(ddxMut.data.therapyOptions?.length ?? 0) > 0 && (
+                    <div className="rounded-md border border-violet-500/30 bg-violet-500/5 p-2">
+                      <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-violet-700 dark:text-violet-400">
+                        <Pill className="h-3 w-3" /> Опции терапии (только после подтверждения диагноза)
+                      </div>
+                      <ul className="mt-1 space-y-1.5">
+                        {ddxMut.data.therapyOptions.map((t, j) => (
+                          <li key={j} className="rounded border border-border/60 bg-background/60 p-1.5 text-[10px] space-y-0.5">
+                            <div className="font-medium">Если подтверждён: {t.targetDx}</div>
+                            <div><strong>{t.name}</strong>{t.regimen && <span className="text-muted-foreground"> — {t.regimen}</span>}</div>
+                            {t.justification && <p className="text-muted-foreground leading-snug">{t.justification}</p>}
+                            {(t.evidenceLevel || t.source) && (
+                              <p className="text-[9px] text-teal-700 dark:text-teal-400">
+                                {t.evidenceLevel && <>Доказательность: {t.evidenceLevel}. </>}
+                                {t.source && <>Источник: {t.source}</>}
+                              </p>
+                            )}
+                            {(t.preStartChecks?.length ?? 0) > 0 && (
+                              <p className="text-[9px] text-amber-700 dark:text-amber-400">
+                                <strong>До старта терапии:</strong> {(t.preStartChecks ?? []).join("; ")}
+                              </p>
+                            )}
+                            {t.caution && (
+                              <p className="flex items-start gap-1 text-[9px] text-rose-700 dark:text-rose-400">
+                                <ShieldAlert className="mt-0.5 h-2.5 w-2.5 shrink-0" />
+                                <span>{t.caution}</span>
+                              </p>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  <p className="text-[9px] text-muted-foreground italic">
+                    Решение принимает врач. Система не назначает лечение до верификации диагноза; формуляры и дозы требуют проверки.
+                  </p>
                 </div>
               )}
             </div>

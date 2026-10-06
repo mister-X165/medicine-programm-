@@ -189,6 +189,87 @@ export interface AnalysisStructured {
   verification: VerificationReport;
 }
 
+// ===========================================================================
+// v5.2 — Ответ эндпоинта дифференциальной диагностики (медкарта, ИИ-ассистент)
+// ---------------------------------------------------------------------------
+// Переработан по итогам пилотной эксплуатации:
+//   • несколько гипотез с аргументами ЗА/ПРОТИВ вместо одного диагноза;
+//   • явный запрет лечения до обследования + план подтверждения;
+//   • многопроходная самопроверка ИИ (verification) с отчётом исправлений;
+//   • сверка с КР Минздрава РФ И международными авторитетными источниками.
+// ===========================================================================
+
+/** Привязанная к гипотезе клиническая рекомендация (КР Минздрава РФ). */
+export interface DDxClinrecRef {
+  codeVersion: string;
+  name: string;
+  mkbString: string;
+  url: string;
+  pdfUrl: string;
+  npcApproved: boolean;
+  ageCategory: string;
+  developers: string[];
+  publishDate: string | null;
+  matchType: "name" | "mkb";
+}
+
+/** Одна гипотеза из ответа /api/ai/differential-diagnosis. */
+export interface DDxHypothesis {
+  diagnosis: string;
+  icd10: string;
+  probability: number;
+  /** Аргументы ЗА — только из переданных врачом данных. */
+  argumentsFor: string[];
+  /** Аргументы ПРОТИВ — что не укладывается в гипотезу. */
+  argumentsAgainst: string[];
+  /** Обследования для подтверждения/исключения гипотезы. */
+  workup: string[];
+  /** Тест/признак, которым гипотеза различается с соседними. */
+  differentiator?: string;
+  redFlags?: string[];
+  /** Свободное обоснование ИИ (патофизиология, эпидемиология). */
+  rationale?: string;
+  /** КР Минздрава РФ, найденная по названию/МКБ-10 гипотезы. */
+  clinrec?: DDxClinrecRef | null;
+  /** Международные источники (PubMed/NICE/ВОЗ/Cochrane/CDC/ESC/EMA/NCCN), привязанные к гипотезе. */
+  intlSources?: Array<{ title: string; url: string; source: string }>;
+}
+
+/** Опция терапии «если подтверждён [диагноз]» — НЕ назначение до верификации. */
+export interface DDxTherapyOption {
+  targetDx: string;
+  name: string;
+  regimen?: string;
+  justification?: string;
+  evidenceLevel?: string;
+  source?: string;
+  caution?: string;
+  /** Какие контроли нужны ДО старта терапии серьёзным препаратом. */
+  preStartChecks?: string[];
+}
+
+/** Полный ответ эндпоинта дифференциальной диагностики. */
+export interface DDxResponse {
+  diagnoses: DDxHypothesis[];
+  /** План дообследования, закрывающий все гипотезы (сводный). */
+  workupPlan: WorkupItem[];
+  /** Терапия ТОЛЬКО как опции после подтверждения — с обоснованием. */
+  therapyOptions: DDxTherapyOption[];
+  /** Отчёт о самопроверке ИИ (сколько проходов, что исправлено). */
+  verification?: VerificationReport;
+  clinrecSummary?: {
+    matched: number;
+    total: number;
+    source: string;
+    /** v5.2: международные источники, привлечённые к проверке. */
+    internationalCount?: number;
+    internationalQuery?: string;
+  };
+  provider?: string;
+  error?: string;
+  raw?: string;
+}
+
 export interface AnalysisResultData {
   id: string;
   caseId: string;
