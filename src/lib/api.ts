@@ -456,6 +456,28 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
+  // v5.1 (audit 9 / partial 5): hard workflow gate for therapy options.
+  // Подтверждение диагноза — разблокирует TherapyOption'ы с тем же targetDx.
+  // Отмена подтверждения — возвращает их в «замороженное» состояние.
+  confirmDx: (
+    caseId: string,
+    diagnosis: string,
+    action: "confirm_dx" | "unconfirm_dx",
+    evidence?: string,
+  ) =>
+    fetchJSON<{
+      analysis: {
+        controlWeights: Record<string, number>;
+        doctorComments: unknown[];
+        conclusion: string;
+        structured: { confirmedDx?: string[] } | null;
+      };
+    }>(`${API_BASE}/cases/${caseId}/analysis/control`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmDx: { action, diagnosis, evidence } }),
+    }),
+
   // Recommendations
   getRecommendations: (params?: { q?: string; gene?: string; category?: string }) =>
     fetchJSON<{ recommendations: Array<Record<string, unknown>>; count: number }>(

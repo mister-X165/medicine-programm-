@@ -505,7 +505,10 @@ async function analyzeCase(req: Request, caseId: string) {
 После гипотез: одна строка «Предварительный рабочий диагноз: [название] ([МКБ-10]) — вероятность ~NN%».
 
 ### НЕОБХОДИМОЕ ДОПОЛНИТЕЛЬНОЕ ОБСЛЕДОВАНИЕ
-Строки строго: - [обследование] — [приоритет: срочно|высокий|плановый] — [зачем: какую гипотезу подтверждает/исключает]
+Каждое исследование — отдельный буллит, СТРОГО в этом каркасе (однострочная разметка через « — » или « | », не считая многострочного поля «Интерпретация»):
+- [Название исследования] — [приоритет: срочно|высокий|плановый] — [зачем: какую гипотезу подтверждает/исключает] — подтверждает гипотезу [названия, через запятую] — исключает гипотезу [названия, через запятую] — ожидаемый результат: [конкретные значения/паттерн при целевой гипотезе] — норма: [референсный диапазон] — подтверждает, если: [критерий позитивного результата для целевой гипотезы] — исключает, если: [критерий негативного/альтернативного результата]
+На следующей строке под этим буллитом — «Интерпретация: [развёрнутое руководство по интерпретации результата: какие значения/паттерны значимы, на что обратить внимание при росте/снижении, что считается ложно-положительным/ложно-отрицательным, как дифференцировать пограничные значения]».
+ОДНО исследование = ОДИН буллит с полями + одна строка «Интерпретация: …». НЕ объединяй несколько тестов в один буллит. Если поле не применимо (например, нет явного референса) — пиши «—».
 
 ### ТЕРАПЕВТИЧЕСКИЕ ОПЦИИ ПОСЛЕ ПОДТВЕРЖДЕНИЯ ДИАГНОЗА
 Для каждой гипотезы заголовок: «Если подтверждён [диагноз]:» и под ним строки:
@@ -1327,39 +1330,142 @@ function extractSingleLine(block: string, labels: string[]): string | undefined 
   return undefined;
 }
 
-/** Парсер плана дообследования: «- Название — приоритет — зачем». */
+/**
+ * v5.1: Парсер плана дообследования.
+ *
+ * Старый формат:  `- Название — приоритет — зачем`
+ * Новый формат (см. промпт выше): каждая запись — это ОДНА строка-буллит
+ * с расширенным набором тегов + следующая строка «Интерпретация: …».
+ *
+ * Поддерживаются оба формата (старые данные без новых полей сохраняют
+ * обратную совместимость — все новые поля опциональны).
+ *
+ * Извлекаемые поля:
+ *   - name            — название обследования
+ *   - priority        — срочно/высокий/плановый
+ *   - purpose         — «зачем: какую гипотезу подтверждает/исключает»
+ *   - targetDx        — (legacy) одно название гипотезы
+ *   - targetDxConfirm — массив «подтверждает гипотезу: A, B, C»
+ *   - targetDxRefute  — массив «исключает гипотезу: A, B, C»
+ *   - expectedResult  — «ожидаемый результат: ...»
+ *   - normalRange     — «норма: ...»
+ *   - cutoffs         — (алиас для expectedResult+normalRange, если
+ *                       промпт дал только «пороги:»)
+ *   - confirmsIf      — «подтверждает, если: ...»
+ *   - refutesIf       — «исключает, если: ...»
+ *   - interpretation  — следующая строка «Интерпретация: …»
+ */
 export function parseWorkup(text: string): WorkupItem[] {
   if (!text) return [];
   const out: WorkupItem[] = [];
-  for (const line of text.split(/\r?\n/)) {
-    const t = line.trim().replace(/^[-•*]\s*/, "");
+  const lines = text.split(/\r?\n/);
+
+  /** Извлекает хвост после явно названного тега в строке. */
+  function extractExplicit(line: string, tag: string): string | undefined {
+    const re = new RegExp(`${tag}\\s*[:=—\\-]?\\s*([^|—]+?)(?:\\s+[—|]\\s+|$)`, "iu");
+    const m = line.match(re);
+    if (!m?.[1]) return undefined;
+    const v = m[1].trim();
+    return v === "—" ? undefined : v;
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const t = raw.trim().replace(/^[-•*]\s*/, "");
     if (!t || t.length < 4) continue;
     if (/^(обследование|план|приоритет)/i.test(t) && !t.includes("—")) continue;
+
+    // Отдельная строка «Интерпретация: …» привязывается к ПРЕДЫДУЩЕМУ буллиту.
+    if (/^Интерпретаци[а-яё]*\s*[:.]?\s*/i.test(t)) {
+      const v = t.replace(/^Интерпретаци[а-яё]*\s*[:.]?\s*/i, "").trim();
+      if (v && out.length > 0) out[out.length - 1].interpretation = v;
+      continue;
+    }
+
+    // Если строка содержит ровно один разделитель « — », это legacy-формат
+    // «name — priority — purpose». Парсим как раньше.
     const parts = t.split(/\s*[—–]\s*|\s+\|\s+/);
     if (parts.length < 2) {
       out.push({ name: t, priority: "routine" });
       continue;
     }
+
     const name = parts[0].trim();
     let priority: WorkupItem["priority"] = "routine";
     let purpose = "";
+    let targetDx: string | undefined;
+    let targetDxConfirm: string[] | undefined;
+    let targetDxRefute: string[] | undefined;
+    let expectedResult: string | undefined;
+    let normalRange: string | undefined;
+    let confirmsIf: string | undefined;
+    let refutesIf: string | undefined;
+
     const p1 = (parts[1] ?? "").trim().toLowerCase();
-    const p2 = parts.slice(2).join(" — ").trim();
     if (/сроч|urgent|экстрен|немедлен/i.test(p1)) priority = "urgent";
     else if (/высок|high/i.test(p1)) priority = "high";
     else if (/планов|routine|низк/i.test(p1)) priority = "routine";
+
+    // Легаси-часть: «зачем» — это всё после приоритета или, если приоритета
+    // нет, второй сегмент.
+    const p2 = parts.slice(2).join(" — ").trim();
     if (p2) purpose = p2;
     else if (parts.length === 2 && !/сроч|высок|планов|urgent|high|routine|низк/i.test(p1)) {
-      // вторая часть — цель, не приоритет
       purpose = parts[1].trim();
       priority = /сроч|экстрен/i.test(t) ? "urgent" : "routine";
     }
-    const targetDxMatch = purpose.match(/(?:гипотез[а-яё]*|диагноз[а-яё]*)\s*[«"]?([^«»;,.]{3,60})/i);
+
+    // v5.1: явные теги в одной строке. Если их нет — это legacy-формат,
+    // и мы по-прежнему извлекаем targetDx через старый regex.
+    targetDxConfirm = extractExplicit(t, "подтверждает гипотезу")?.split(/[,;]/).map((s) => s.trim()).filter(Boolean);
+    if (!targetDxConfirm) targetDxConfirm = extractExplicit(t, "подтверждает")?.split(/[,;]/).map((s) => s.trim()).filter(Boolean);
+    targetDxRefute = extractExplicit(t, "исключает гипотезу")?.split(/[,;]/).map((s) => s.trim()).filter(Boolean);
+    if (!targetDxRefute) targetDxRefute = extractExplicit(t, "исключает")?.split(/[,;]/).map((s) => s.trim()).filter(Boolean);
+
+    expectedResult = extractExplicit(t, "ожидаемый результат")
+      ?? extractExplicit(t, "ожидаемо");
+    normalRange = extractExplicit(t, "норма")
+      ?? extractExplicit(t, "референс");
+    confirmsIf = extractExplicit(t, "подтверждает, если")
+      ?? extractExplicit(t, "положительно при");
+    refutesIf = extractExplicit(t, "исключает, если")
+      ?? extractExplicit(t, "отрицательно при");
+
+    // Легаси: если новых тегов не было, targetDx достаём по старому regex.
+    if (!targetDxConfirm || targetDxConfirm.length === 0) {
+      const targetDxMatch = purpose.match(
+        /(?:гипотез[а-яё]*|диагноз[а-яё]*)\s*[«"]?([^«»;,.]{3,60})/i,
+      );
+      targetDx = targetDxMatch ? targetDxMatch[1].trim() : undefined;
+    } else {
+      // Налицо мульти-таргет — legacy-поле targetDx = первому.
+      targetDx = targetDxConfirm[0];
+    }
+
+    // Очистим «зачем» от дублирования тегов (если они в нём присутствуют).
+    const cleanedPurpose = purpose
+      ? purpose
+          .replace(/—?\s*подтверждает\s+гипотез[уа]?\s*[:—-]?\s*[^—|]*(?=\s+[—|]\s|$)/iu, "")
+          .replace(/—?\s*исключает\s+гипотез[уа]?\s*[:—-]?\s*[^—|]*(?=\s+[—|]\s|$)/iu, "")
+          .replace(/—?\s*ожидаем(?:ый|о)\s+результат[:—-]?\s*[^—|]*(?=\s+[—|]\s|$)/iu, "")
+          .replace(/—?\s*норма[:—-]?\s*[^—|]*(?=\s+[—|]\s|$)/iu, "")
+          .replace(/—?\s*подтверждает,\s+если[:—-]?\s*[^—|]*(?=\s+[—|]\s|$)/iu, "")
+          .replace(/—?\s*исключает,\s+если[:—-]?\s*[^—|]*(?=\s+[—|]\s|$)/iu, "")
+          .replace(/\s+[—|]\s*$/, "")
+          .trim()
+      : undefined;
+
     out.push({
       name,
       priority,
-      purpose: purpose || undefined,
-      targetDx: targetDxMatch ? targetDxMatch[1].trim() : undefined,
+      purpose: cleanedPurpose || purpose || undefined,
+      targetDx,
+      targetDxConfirm: targetDxConfirm?.length ? targetDxConfirm : undefined,
+      targetDxRefute: targetDxRefute?.length ? targetDxRefute : undefined,
+      expectedResult,
+      normalRange,
+      confirmsIf,
+      refutesIf,
     });
   }
   return out.slice(0, 15);

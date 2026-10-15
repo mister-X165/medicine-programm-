@@ -107,6 +107,19 @@ export const controlPanelSchema = z.object({
     })
   ),
   conclusion: z.string().optional(),
+  /**
+   * v5.1 (audit 9 / partial 5): hard workflow gate for therapy options.
+   * PATCH /api/cases/[id]/analysis/control с этим полем добавляет
+   * (action="confirm_dx") или убирает (action="unconfirm_dx") диагноз
+   * из `structured.confirmedDx`. Используется UI-гейтом для разблокировки
+   * TherapyOption'ов соответствующих `targetDx`.
+   */
+  confirmDx: z.object({
+    action: z.enum(["confirm_dx", "unconfirm_dx"]),
+    diagnosis: z.string().min(3).max(200),
+    /** Необязательное обоснование, чем подтверждено (результаты анализов). */
+    evidence: z.string().max(2000).optional(),
+  }).optional(),
 });
 
 // ---------------------------------------------------------------------------

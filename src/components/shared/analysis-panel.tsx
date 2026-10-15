@@ -40,6 +40,7 @@ import type {
   ICD10CodeMatch,
   ClinicalPathwayMatch,
   DifferentialDiagnosis,
+  TherapyOption,
   WorkupItem,
 } from "@/lib/types";
 import { api } from "@/lib/api";
@@ -288,6 +289,76 @@ export function AnalysisPanel({ analysis, caseId, onRunAnalysis, isAnalyzing, ha
   const monitoringPlan = structured?.monitoringPlan ?? [];
   const verification = structured?.verification;
   const corrections = verification?.corrections ?? [];
+  // v5.1 (audit 9 / partial 5): hard workflow gate.
+  const confirmedDx: string[] = Array.isArray(structured?.confirmedDx)
+    ? structured.confirmedDx
+    : [];
+  // We keep an optimistic local copy so the UI reacts instantly when the
+  // doctor clicks "Подтвердить диагноз" without waiting for the mutation.
+  const [optimisticConfirmed, setOptimisticConfirmed] = React.useState<string[]>([]);
+  const effectiveConfirmed = React.useMemo(() => {
+    // Merge server-side + optimistic, dedupe case-insensitively.
+    const set = new Set<string>();
+    for (const d of confirmedDx) set.add(d.toLowerCase());
+    const merged: string[] = [...confirmedDx];
+    for (const d of optimisticConfirmed) {
+      if (!set.has(d.toLowerCase())) {
+        merged.push(d);
+        set.add(d.toLowerCase());
+      }
+    }
+    return merged;
+  }, [confirmedDx, optimisticConfirmed]);
+  // Reset optimistic when server data changes (e.g. after re-fetch).
+  React.useEffect(() => {
+    setOptimisticConfirmed([]);
+  }, [JSON.stringify(confirmedDx)]);
+
+  const qc = useQueryClient();
+  const confirmDxMutation = useMutation({
+    mutationFn: async ({
+      diagnosis,
+      action,
+      evidence,
+    }: {
+      diagnosis: string;
+      action: "confirm_dx" | "unconfirm_dx";
+      evidence?: string;
+    }) => api.confirmDx(caseId, diagnosis, action, evidence),
+    onSuccess: () => {
+      // The parent's analysis query will refetch and authoritative data
+      // will arrive. Optimistic UI may be cleared on the next render.
+      qc.invalidateQueries({ queryKey: ["analysis", caseId] });
+    },
+    onError: (err: unknown) => {
+      const msg = err instanceof Error ? err.message : "Не удалось сохранить";
+      toast.error(`Подтверждение диагноза не сохранено: ${msg}`);
+      // Roll back optimistic on error: invalidate to re-fetch server state.
+      qc.invalidateQueries({ queryKey: ["analysis", caseId] });
+    },
+  });
+
+  const isDxConfirmed = React.useCallback(
+    (dx: string) =>
+      effectiveConfirmed.some((d) => d.toLowerCase() === dx.toLowerCase()),
+    [effectiveConfirmed],
+  );
+
+  const handleConfirmDx = React.useCallback(
+    (dx: string, action: "confirm_dx" | "unconfirm_dx", evidence?: string) => {
+      // Optimistic UI: apply immediately for responsiveness.
+      setOptimisticConfirmed((prev) => {
+        if (action === "confirm_dx") {
+          return prev.some((d) => d.toLowerCase() === dx.toLowerCase())
+            ? prev
+            : [...prev, dx];
+        }
+        return prev.filter((d) => d.toLowerCase() !== dx.toLowerCase());
+      });
+      confirmDxMutation.mutate({ diagnosis: dx, action, evidence });
+    },
+    [confirmDxMutation],
+  );
 
   const handleCitationClick = (cit: Citation) => {
     setActiveCitation(cit.claim);
@@ -526,9 +597,24 @@ export function AnalysisPanel({ analysis, caseId, onRunAnalysis, isAnalyzing, ha
               defaultValue={[dxKey(differential[0], 0)]}
               className="space-y-2"
             >
-              {differential.map((dx, idx) => (
-                <DifferentialItem key={dxKey(dx, idx)} dx={dx} value={dxKey(dx, idx)} />
-              ))}
+              {differential.map((dx, idx) => {
+                const confirmed = isDxConfirmed(dx.diagnosis);
+                return (
+                  <DifferentialItem
+                    key={dxKey(dx, idx)}
+                    dx={dx}
+                    value={dxKey(dx, idx)}
+                    confirmed={confirmed}
+                    onConfirmToggle={(action, evidence) =>
+                      handleConfirmDx(dx.diagnosis, action, evidence)
+                    }
+                    isConfirming={
+                      confirmDxMutation.isPending &&
+                      confirmDxMutation.variables?.diagnosis === dx.diagnosis
+                    }
+                  />
+                );
+              })}
             </Accordion>
           </CardContent>
         </Card>
@@ -572,54 +658,28 @@ export function AnalysisPanel({ analysis, caseId, onRunAnalysis, isAnalyzing, ha
                   <div className="space-y-1.5">
                     {groupItems.map(({ item, key }) => {
                       const done = !!workupDone[key];
+                      const hasInterpretationFields = !!(
+                        item.interpretation ||
+                        item.expectedResult ||
+                        item.normalRange ||
+                        item.cutoffs ||
+                        item.confirmsIf ||
+                        item.refutesIf ||
+                        (item.targetDxConfirm && item.targetDxConfirm.length > 0) ||
+                        (item.targetDxRefute && item.targetDxRefute.length > 0)
+                      );
                       return (
-                        <div
+                        <WorkupCard
                           key={key}
-                          className={cn(
-                            "flex items-center gap-3 rounded-lg border p-2.5 transition-colors",
-                            done
-                              ? "border-emerald-500/40 bg-emerald-500/5"
-                              : "hover:bg-accent/40",
-                          )}
-                        >
-                          <Checkbox
-                            id={`workup-${caseId}-${key}`}
-                            checked={done}
-                            onCheckedChange={() => toggleWorkupItem(key)}
-                            className="data-[state=checked]:border-emerald-600 data-[state=checked]:bg-emerald-600 data-[state=checked]:text-white"
-                            aria-label={`Отметить выполненным: ${item.name}`}
-                          />
-                          <label
-                            htmlFor={`workup-${caseId}-${key}`}
-                            className="flex min-h-[44px] flex-1 cursor-pointer flex-col justify-center gap-0.5 py-1"
-                          >
-                            <span
-                              className={cn(
-                                "text-sm font-medium leading-snug",
-                                done && "text-muted-foreground line-through",
-                              )}
-                            >
-                              {item.name}
-                            </span>
-                            {item.purpose && (
-                              <span className="text-xs text-muted-foreground">{item.purpose}</span>
-                            )}
-                          </label>
-                          <div className="flex shrink-0 flex-col items-end gap-1">
-                            <Badge variant="outline" className={cn("text-[10px]", group.badgeCls)}>
-                              {group.short}
-                            </Badge>
-                            {item.targetDx && (
-                              <Badge
-                                variant="outline"
-                                className="max-w-40 truncate text-[10px]"
-                                title={item.targetDx}
-                              >
-                                {item.targetDx}
-                              </Badge>
-                            )}
-                          </div>
-                        </div>
+                          caseId={caseId}
+                          itemKey={key}
+                          item={item}
+                          done={done}
+                          groupShort={group.short}
+                          groupBadgeCls={group.badgeCls}
+                          onToggle={toggleWorkupItem}
+                          hasInterpretationFields={hasInterpretationFields}
+                        />
                       );
                     })}
                   </div>
@@ -640,6 +700,16 @@ export function AnalysisPanel({ analysis, caseId, onRunAnalysis, isAnalyzing, ha
               <Pill className="h-4 w-4 text-emerald-600" />
               Терапия
               <Badge variant="secondary" className="ml-auto">{therapyOptions.length}</Badge>
+              {/* v5.1: shows how many diagnoses are confirmed vs total. */}
+              {effectiveConfirmed.length > 0 && (
+                <Badge
+                  variant="outline"
+                  className="gap-1 border-teal-500/40 bg-teal-500/10 text-[10px] text-teal-700 dark:text-teal-300"
+                >
+                  <ShieldCheck className="h-3 w-3" aria-hidden />
+                  Подтверждено {effectiveConfirmed.length}
+                </Badge>
+              )}
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -651,51 +721,25 @@ export function AnalysisPanel({ analysis, caseId, onRunAnalysis, isAnalyzing, ha
               <AlertDescription className="text-xs text-amber-800/90 dark:text-amber-200/90">
                 Варианты терапии приведены для каждой диагностической гипотезы и подлежат
                 применению только ПОСЛЕ её подтверждения результатами дообследования.
+                {effectiveConfirmed.length === 0
+                  ? " Карточки терапии заблокированы — подтвердите хотя бы один диагноз кнопкой «Подтвердить диагноз» в карточке гипотезы."
+                  : ` Разблокированы для диагнозов: ${effectiveConfirmed.join(", ")}.`}
               </AlertDescription>
             </Alert>
             <div className="grid max-h-[600px] gap-3 overflow-y-auto pr-1 lg:grid-cols-2">
-              {therapyOptions.map((t, i) => (
-                <div key={i} className="space-y-2 rounded-lg border p-3">
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <Pill className="h-4 w-4 shrink-0 text-emerald-600" aria-hidden />
-                    <span className="font-mono text-sm font-semibold leading-snug">{t.name}</span>
-                    {t.evidenceLevel && (
-                      <Badge
-                        variant="outline"
-                        className="border-emerald-500/40 bg-emerald-500/10 text-[10px] text-emerald-700 dark:text-emerald-300"
-                      >
-                        Доказательность {t.evidenceLevel}
-                      </Badge>
-                    )}
-                    {t.source && <SourceBadge source={t.source} fallbackToRaw />}
-                    {t.targetDx && (
-                      <Badge
-                        variant="outline"
-                        className="max-w-full truncate text-[10px]"
-                        title={t.targetDx}
-                      >
-                        для: {t.targetDx}
-                      </Badge>
-                    )}
-                  </div>
-                  {t.regimen && (
-                    <p className="text-sm leading-snug">
-                      <span className="font-semibold text-muted-foreground">Схема:</span> {t.regimen}
-                    </p>
-                  )}
-                  {t.justification && (
-                    <p className="text-xs leading-relaxed text-muted-foreground">{t.justification}</p>
-                  )}
-                  {t.caution && (
-                    <div className="flex items-start gap-1.5 rounded-md border border-red-500/30 bg-red-500/5 p-2 text-xs leading-snug text-red-700 dark:text-red-300">
-                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-600" aria-hidden />
-                      <span>
-                        <strong>Осторожно:</strong> {t.caution}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              ))}
+              {therapyOptions.map((t, i) => {
+                // v5.1: hard workflow gate — therapy option is locked
+                // unless its targetDx is in the confirmed list. Options
+                // without a targetDx are always locked (must be tied to
+                // a hypothesis by the parser; if not — show as locked).
+                const targetDx = t.targetDx?.trim();
+                const isUnlocked = targetDx
+                  ? effectiveConfirmed.some(
+                      (d) => d.toLowerCase() === targetDx.toLowerCase(),
+                    )
+                  : false;
+                return <TherapyCard key={i} option={t} unlocked={isUnlocked} />;
+              })}
             </div>
           </CardContent>
         </Card>
@@ -1079,13 +1123,29 @@ export function AnalysisPanel({ analysis, caseId, onRunAnalysis, isAnalyzing, ha
 // Дифференциальный диагноз: карточка-гипотеза (Accordion)
 // ===========================================================================
 
-function DifferentialItem({ dx, value }: { dx: DifferentialDiagnosis; value: string }) {
+function DifferentialItem({
+  dx,
+  value,
+  confirmed,
+  onConfirmToggle,
+  isConfirming,
+}: {
+  dx: DifferentialDiagnosis;
+  value: string;
+  confirmed: boolean;
+  onConfirmToggle: (action: "confirm_dx" | "unconfirm_dx", evidence?: string) => void;
+  isConfirming: boolean;
+}) {
   const pct = clamp01(dx.probability) * 100;
   const redFlags = dx.redFlags ?? [];
   const argsFor = dx.argumentsFor ?? [];
   const argsAgainst = dx.argumentsAgainst ?? [];
   const workup = dx.workup ?? [];
   const sources = dx.sources ?? [];
+  // v5.1: dialog for entering confirmation evidence (free-text — what test
+  // results / findings support the diagnosis).
+  const [confirmDialogOpen, setConfirmDialogOpen] = React.useState(false);
+  const [evidence, setEvidence] = React.useState("");
 
   return (
     <AccordionItem
@@ -1120,6 +1180,12 @@ function DifferentialItem({ dx, value }: { dx: DifferentialDiagnosis; value: str
             )}
             {dx.rank === 1 && (
               <Badge className="bg-emerald-600 text-[10px] text-white">Наиболее вероятная</Badge>
+            )}
+            {confirmed && (
+              <Badge className="gap-1 bg-teal-600 text-[10px] text-white">
+                <ShieldCheck className="h-3 w-3" aria-hidden />
+                Подтверждён
+              </Badge>
             )}
             {dx.clinrecCode && (
               <Badge
@@ -1183,6 +1249,104 @@ function DifferentialItem({ dx, value }: { dx: DifferentialDiagnosis; value: str
               ))}
             </div>
           )}
+
+          {/* v5.1 (audit 9 / partial 5): hard workflow gate for therapy.
+              Подтверждение диагноза — разворачивает диалог, в котором врач
+              указывает, какими результатами обследования он подтвердил
+              гипотезу. После подтверждения TherapyOption'ы с тем же
+              `targetDx` разблокируются (см. блок терапии ниже). */}
+          <div className="flex flex-wrap items-center gap-2 border-t pt-2">
+            {confirmed ? (
+              <>
+                <Badge className="gap-1 bg-teal-600 text-[10px] text-white">
+                  <ShieldCheck className="h-3 w-3" aria-hidden />
+                  Диагноз подтверждён — терапия разблокирована
+                </Badge>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1 px-2 text-[11px]"
+                  disabled={isConfirming}
+                  onClick={() => onConfirmToggle("unconfirm_dx")}
+                >
+                  {isConfirming ? (
+                    <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+                  ) : (
+                    <X className="h-3 w-3" aria-hidden />
+                  )}
+                  Снять подтверждение
+                </Button>
+              </>
+            ) : (
+              <Button
+                variant="default"
+                size="sm"
+                className="h-7 gap-1 px-3 text-[11px]"
+                disabled={isConfirming}
+                onClick={() => setConfirmDialogOpen(true)}
+              >
+                {isConfirming ? (
+                  <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+                ) : (
+                  <ShieldCheck className="h-3 w-3" aria-hidden />
+                )}
+                Подтвердить диагноз
+              </Button>
+            )}
+          </div>
+
+          <Dialog open={confirmDialogOpen} onOpenChange={setConfirmDialogOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Подтвердить диагноз: {dx.diagnosis}</DialogTitle>
+                <DialogDescription>
+                  Укажите, какими результатами обследования вы подтвердили
+                  эту гипотезу. Обоснование запишется в журнал аудита и
+                  разблокирует терапевтические опции для этого диагноза.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-2">
+                <Label htmlFor={`confirm-evidence-${value}`} className="text-xs">
+                  Обоснование (какие результаты анализов / данные подтвердили диагноз)
+                </Label>
+                <Textarea
+                  id={`confirm-evidence-${value}`}
+                  value={evidence}
+                  onChange={(e) => setEvidence(e.target.value)}
+                  placeholder="Например: «Биопсия — инвазивная карцинома G2; ИГХ: ER+/PR+/HER2-»; «Тропонин I 1.2 нг/мл, ЭКГ: подъём ST в V2-V4»"
+                  className="min-h-[100px] text-xs"
+                />
+              </div>
+              <DialogFooter className="gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setConfirmDialogOpen(false);
+                    setEvidence("");
+                  }}
+                >
+                  Отмена
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={isConfirming}
+                  onClick={() => {
+                    onConfirmToggle("confirm_dx", evidence.trim() || undefined);
+                    setConfirmDialogOpen(false);
+                    setEvidence("");
+                  }}
+                >
+                  {isConfirming ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                  ) : (
+                    <ShieldCheck className="h-3.5 w-3.5" aria-hidden />
+                  )}
+                  Подтвердить диагноз
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </div>
       </AccordionContent>
     </AccordionItem>
@@ -1586,4 +1750,273 @@ function SuspicionBadge({ level }: { level: string }) {
 function translateConfidenceKey(key: string): string {
   const map: Record<string, string> = { diagnosis: "Диагноз", therapy: "Терапия", prognosis: "Прогноз" };
   return map[key] ?? key;
+}
+
+// ===========================================================================
+// v5.1 (audit 9 / partial 5): TherapyCard — карточка терапии с жёстким
+// workflow-гейтом: опция заблокирована (серая, no-hover) до тех пор, пока
+// её targetDx не подтверждён в structured.confirmedDx.
+// ===========================================================================
+
+function TherapyCard({
+  option,
+  unlocked,
+}: {
+  option: TherapyOption;
+  unlocked: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        "space-y-2 rounded-lg border p-3 transition-opacity",
+        unlocked
+          ? "border-emerald-500/30 bg-emerald-500/5"
+          : "border-muted bg-muted/30 opacity-55",
+      )}
+      aria-disabled={!unlocked}
+    >
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Pill className="h-4 w-4 shrink-0 text-emerald-600" aria-hidden />
+        <span className="font-mono text-sm font-semibold leading-snug">{option.name}</span>
+        {option.evidenceLevel && (
+          <Badge
+            variant="outline"
+            className="border-emerald-500/40 bg-emerald-500/10 text-[10px] text-emerald-700 dark:text-emerald-300"
+          >
+            Доказательность {option.evidenceLevel}
+          </Badge>
+        )}
+        {option.source && <SourceBadge source={option.source} fallbackToRaw />}
+        {option.targetDx && (
+          <Badge
+            variant="outline"
+            className={cn(
+              "max-w-full truncate text-[10px]",
+              unlocked
+                ? "border-teal-500/40 bg-teal-500/10 text-teal-700 dark:text-teal-300"
+                : "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+            )}
+            title={option.targetDx}
+          >
+            для: {option.targetDx}
+          </Badge>
+        )}
+        {unlocked ? (
+          <Badge
+            variant="outline"
+            className="ml-auto gap-1 border-teal-500/40 bg-teal-500/10 text-[10px] text-teal-700 dark:text-teal-300"
+          >
+            <ShieldCheck className="h-3 w-3" aria-hidden />
+            Доступно
+          </Badge>
+        ) : (
+          <Badge
+            variant="outline"
+            className="ml-auto gap-1 border-amber-500/40 bg-amber-500/10 text-[10px] text-amber-700 dark:text-amber-300"
+          >
+            <AlertTriangle className="h-3 w-3" aria-hidden />
+            Заблокировано — подтвердите диагноз
+          </Badge>
+        )}
+      </div>
+      {option.regimen && (
+        <p className="text-sm leading-snug">
+          <span className="font-semibold text-muted-foreground">Схема:</span> {option.regimen}
+        </p>
+      )}
+      {option.justification && (
+        <p className="text-xs leading-relaxed text-muted-foreground">{option.justification}</p>
+      )}
+      {option.caution && (
+        <div className="flex items-start gap-1.5 rounded-md border border-red-500/30 bg-red-500/5 p-2 text-xs leading-snug text-red-700 dark:text-red-300">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-600" aria-hidden />
+          <span>
+            <strong>Осторожно:</strong> {option.caution}
+          </span>
+        </div>
+      )}
+      {!unlocked && (
+        <p className="rounded-md bg-amber-500/10 px-2 py-1 text-[11px] leading-snug text-amber-800 dark:text-amber-200">
+          Терапевтическая опция недоступна до подтверждения диагноза
+          {option.targetDx ? ` «${option.targetDx}»` : ""}. Подтвердите диагноз
+          кнопкой в карточке соответствующей гипотезы дифференциального ряда.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ===========================================================================
+// v5.1 (audit 9 / fail 4c): WorkupCard — расширенная карточка обследования
+// с интерпретационными полями и мульти-таргет confirm/refute badges.
+// ===========================================================================
+
+function WorkupCard({
+  caseId,
+  itemKey,
+  item,
+  done,
+  groupShort,
+  groupBadgeCls,
+  onToggle,
+  hasInterpretationFields,
+}: {
+  caseId: string;
+  itemKey: string;
+  item: WorkupItem;
+  done: boolean;
+  groupShort: string;
+  groupBadgeCls: string;
+  onToggle: (key: string) => void;
+  hasInterpretationFields: boolean;
+}) {
+  const [interpretOpen, setInterpretOpen] = React.useState(false);
+  return (
+    <div
+      className={cn(
+        "rounded-lg border p-2.5 transition-colors",
+        done ? "border-emerald-500/40 bg-emerald-500/5" : "hover:bg-accent/40",
+      )}
+    >
+      <div className="flex items-center gap-3">
+        <Checkbox
+          id={`workup-${caseId}-${itemKey}`}
+          checked={done}
+          onCheckedChange={() => onToggle(itemKey)}
+          className="data-[state=checked]:border-emerald-600 data-[state=checked]:bg-emerald-600 data-[state=checked]:text-white"
+          aria-label={`Отметить выполненным: ${item.name}`}
+        />
+        <label
+          htmlFor={`workup-${caseId}-${itemKey}`}
+          className="flex min-h-[44px] flex-1 cursor-pointer flex-col justify-center gap-0.5 py-1"
+        >
+          <span
+            className={cn(
+              "text-sm font-medium leading-snug",
+              done && "text-muted-foreground line-through",
+            )}
+          >
+            {item.name}
+          </span>
+          {item.purpose && (
+            <span className="text-xs text-muted-foreground">{item.purpose}</span>
+          )}
+        </label>
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          <Badge variant="outline" className={cn("text-[10px]", groupBadgeCls)}>
+            {groupShort}
+          </Badge>
+          {item.targetDx && !hasInterpretationFields && (
+            <Badge
+              variant="outline"
+              className="max-w-40 truncate text-[10px]"
+              title={item.targetDx}
+            >
+              {item.targetDx}
+            </Badge>
+          )}
+        </div>
+      </div>
+
+      {/* Confirm / Refute badges (multi-target) */}
+      {((item.targetDxConfirm && item.targetDxConfirm.length > 0) ||
+        (item.targetDxRefute && item.targetDxRefute.length > 0)) && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {item.targetDxConfirm?.map((dx, i) => (
+            <Badge
+              key={`c-${i}`}
+              variant="outline"
+              className="max-w-full truncate text-[10px] border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+              title={dx}
+            >
+              <Check className="mr-0.5 h-3 w-3" aria-hidden />
+              подтверждает: {dx}
+            </Badge>
+          ))}
+          {item.targetDxRefute?.map((dx, i) => (
+            <Badge
+              key={`r-${i}`}
+              variant="outline"
+              className="max-w-full truncate text-[10px] border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300"
+              title={dx}
+            >
+              <X className="mr-0.5 h-3 w-3" aria-hidden />
+              исключает: {dx}
+            </Badge>
+          ))}
+        </div>
+      )}
+
+      {/* Quick facts: expected result, normal range, confirms/refutes if */}
+      {(item.expectedResult || item.normalRange || item.cutoffs) && (
+        <dl className="mt-2 grid gap-x-3 gap-y-0.5 text-[11px] leading-snug sm:grid-cols-2">
+          {item.expectedResult && (
+            <div className="flex gap-1">
+              <dt className="font-semibold text-muted-foreground">Ожидаемый результат:</dt>
+              <dd className="text-foreground">{item.expectedResult}</dd>
+            </div>
+          )}
+          {item.normalRange && (
+            <div className="flex gap-1">
+              <dt className="font-semibold text-muted-foreground">Норма:</dt>
+              <dd className="text-foreground">{item.normalRange}</dd>
+            </div>
+          )}
+          {item.cutoffs && !item.normalRange && (
+            <div className="flex gap-1">
+              <dt className="font-semibold text-muted-foreground">Пороги:</dt>
+              <dd className="text-foreground">{item.cutoffs}</dd>
+            </div>
+          )}
+          {item.confirmsIf && (
+            <div className="flex gap-1">
+              <dt className="font-semibold text-emerald-700 dark:text-emerald-300">Подтверждает, если:</dt>
+              <dd className="text-foreground">{item.confirmsIf}</dd>
+            </div>
+          )}
+          {item.refutesIf && (
+            <div className="flex gap-1">
+              <dt className="font-semibold text-red-700 dark:text-red-300">Исключает, если:</dt>
+              <dd className="text-foreground">{item.refutesIf}</dd>
+            </div>
+          )}
+        </dl>
+      )}
+
+      {/* Collapsible "Как интерпретировать результат" panel */}
+      {(item.interpretation || hasInterpretationFields) && (
+        <Collapsible
+          open={interpretOpen}
+          onOpenChange={setInterpretOpen}
+          className="mt-2"
+        >
+          <CollapsibleTrigger asChild>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 px-2 text-[11px] text-primary hover:text-primary/80"
+            >
+              {interpretOpen ? (
+                <ChevronDown className="h-3 w-3" aria-hidden />
+              ) : (
+                <ChevronRight className="h-3 w-3" aria-hidden />
+              )}
+              Как интерпретировать результат
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+            {item.interpretation ? (
+              <p className="border-l-2 border-primary/30 pl-2">{item.interpretation}</p>
+            ) : (
+              <p className="pl-2 italic">
+                Подробное руководство по интерпретации не сформировано ИИ.
+                Опирайтесь на значения «Ожидаемый результат» / «Норма» /
+                «Подтверждает, если» / «Исключает, если» выше и сверьтесь с КР.
+              </p>
+            )}
+          </CollapsibleContent>
+        </Collapsible>
+      )}
+    </div>
+  );
 }

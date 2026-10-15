@@ -67,6 +67,65 @@ export async function PATCH(
     updates.conclusion = String(data.conclusion).slice(0, MAX_CONCLUSION_LEN);
   }
 
+  // v5.1 (audit 9 / partial 5): hard workflow gate for therapy options.
+  // Подтверждение/отмена подтверждения диагноза сохраняется в
+  // `structured.confirmedDx` — UI использует его, чтобы разблокировать
+  // TherapyOption'ы с соответствующим `targetDx`. До подтверждения
+  // карточки терапии отображаются «замороженными» и недоступны.
+  if (data.confirmDx) {
+    const currentStructured = (() => {
+      try {
+        return existing.structured
+          ? (JSON.parse(existing.structured) as {
+              confirmedDx?: string[];
+              differential?: Array<{ diagnosis?: string }>;
+            })
+          : {};
+      } catch {
+        return {};
+      }
+    })();
+
+    const dxList: string[] = Array.isArray(currentStructured.confirmedDx)
+      ? [...currentStructured.confirmedDx]
+      : [];
+    const targetDx = data.confirmDx.diagnosis.trim();
+    const already = dxList.some((d) => d.toLowerCase() === targetDx.toLowerCase());
+
+    if (data.confirmDx.action === "confirm_dx") {
+      if (!already) dxList.push(targetDx);
+    } else {
+      // unconfirm_dx
+      if (already) {
+        const idx = dxList.findIndex((d) => d.toLowerCase() === targetDx.toLowerCase());
+        if (idx >= 0) dxList.splice(idx, 1);
+      }
+    }
+
+    // Merge structured: preserve existing fields, update confirmedDx.
+    const merged = { ...currentStructured, confirmedDx: dxList };
+    updates.structured = JSON.stringify(merged);
+
+    await appendAudit({
+      caseId,
+      doctorId: session.doctorId,
+      action: data.confirmDx.action,
+      details: JSON.stringify({
+        diagnosis: targetDx,
+        evidence: data.confirmDx.evidence ?? null,
+        confirmedCount: dxList.length,
+      }),
+    });
+
+    logger.info("analysis", "Diagnosis confirmation toggled", {
+      caseId,
+      action: data.confirmDx.action,
+      diagnosis: targetDx,
+      confirmedCount: dxList.length,
+      by: session.doctorCode,
+    });
+  }
+
   if (Object.keys(updates).length === 0) {
     return NextResponse.json({ error: "No fields to update" }, { status: 400 });
   }
@@ -77,12 +136,15 @@ export async function PATCH(
   });
 
   // Audit — attribute to the ACTING doctor (session), not the case owner.
-  await appendAudit({
-    caseId,
-    doctorId: session.doctorId,
-    action: "control_panel_edit",
-    details: JSON.stringify({ fields: Object.keys(updates) }),
-  });
+  // (Skip if confirmDx already audited above to avoid double entries.)
+  if (!data.confirmDx) {
+    await appendAudit({
+      caseId,
+      doctorId: session.doctorId,
+      action: "control_panel_edit",
+      details: JSON.stringify({ fields: Object.keys(updates) }),
+    });
+  }
 
   logger.info("analysis", "Control panel updated", {
     caseId,
@@ -90,11 +152,22 @@ export async function PATCH(
     by: session.doctorCode,
   });
 
+  // Re-parse structured for the response so the client sees the new
+  // confirmedDx list immediately.
+  const structuredOut = (() => {
+    try {
+      return updated.structured ? JSON.parse(updated.structured) : null;
+    } catch {
+      return null;
+    }
+  })();
+
   return NextResponse.json({
     analysis: {
       controlWeights: JSON.parse(updated.controlWeights || "{}"),
       doctorComments: JSON.parse(updated.doctorComments || "[]"),
       conclusion: updated.conclusion,
+      structured: structuredOut,
     },
   });
 }
