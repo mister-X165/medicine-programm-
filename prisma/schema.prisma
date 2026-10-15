@@ -1,0 +1,875 @@
+// СППВР v2.0 — Prisma Schema
+// Enhanced with ICD-10, DDI, Clinical Pathways, Consent, Version History, Electronic Signature
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// Core Entities
+// ============================================================================
+
+model Doctor {
+  id             String   @id @default(cuid())
+  fullName       String
+  specialization String
+  doctorCode     String   @unique
+  passwordHash   String   @default("")
+  role           String   @default("doctor") // admin | doctor | head
+  isActive       Boolean  @default(true)
+  // SECURITY (v2.6): token version — bumped on password/role change to
+  // invalidate all previously issued JWTs (instant revocation).
+  tokenVersion   Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  // SECURITY (incident 2025-09-07): brute-force protection
+  failedLoginAttempts Int      @default(0)
+  lockedUntil         DateTime?
+  lastLoginAt         DateTime?
+
+  keyMaterial    DoctorKeyMaterial?
+
+  cases       Case[]
+  reports     Report[]
+  auditLogs   AuditLog[]
+  sentShares  CaseShare[]  @relation("SentShares")
+  recvShares  CaseShare[]  @relation("ReceivedShares")
+  notifications Notification[]
+  signatures  ReportSignature[]
+  consents    Consent[]
+  // EMR v2.5.0 relations
+  primaryPatients  Patient[]        @relation("PatientPrimaryDoctor")
+  visits           Visit[]
+  vitalSigns       VitalSign[]      @relation("VitalSignRecorder")
+  prescribedMeds   Medication[]    @relation("MedicationPrescriber")
+  immunizations    Immunization[]   @relation("ImmunizationAdmin")
+  carePlans       CarePlan[]       @relation("CarePlanAuthor")
+  orderedExaminations   Examination[] @relation("ExaminationOrderer")
+  performedExaminations Examination[] @relation("ExaminationPerformer")
+  // v2.7: передача доступа к картам пациентов (key-wrapping X25519)
+  grantsGiven  PatientAccessGrant[] @relation("GrantsGrantor")
+  grantsReceived PatientAccessGrant[] @relation("GrantsGrantee")
+
+  @@map("doctors")
+}
+
+model Case {
+  id           String   @id @default(cuid())
+  caseCode     String   @unique
+  patientToken String   // Псевдоним пациента (ФЗ-152)
+  birthYear    Int?
+  sex          String?  // М | Ж
+  status       String   @default("new") // new | uploaded | analyzing | analyzed | reported | archived
+  diagnosisHint String?
+  notes        String?
+  icd10Codes   String   @default("[]") // JSON: [{code, description}]
+  doctorId     String
+  patientId    String?  // Связь с картой пациента (EMR v2.5.0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  doctor      Doctor     @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  patient     Patient?   @relation("PatientCases", fields: [patientId], references: [id], onDelete: SetNull)
+  documents   Document[]
+  analysis    AnalysisResult?
+  reports     Report[]
+  auditLogs   AuditLog[]
+  shares      CaseShare[]
+  consents    Consent[]
+  visits      Visit[]     @relation("VisitCase")
+  examinations Examination[] @relation("CaseExaminations")
+
+  @@index([doctorId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("cases")
+}
+
+model Document {
+  id           String   @id @default(cuid())
+  caseId       String
+  fileName     String
+  fileType     String   // discharge | genetic | image
+  rawContent   String   @default("")
+  deidContent  String   @default("")
+  extractedMeta String  @default("{}") // JSON
+  mimeType     String   @default("application/octet-stream")
+  fileSize     Int      @default(0)
+  storagePath  String?
+  createdAt    DateTime @default(now())
+
+  case Case @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@index([caseId])
+  @@map("documents")
+}
+
+model AnalysisResult {
+  id                    String  @id @default(cuid())
+  caseId                String  @unique
+  entities              String  @default("[]") // JSON
+  mutations             String  @default("[]") // JSON
+  recommendations       String  @default("[]") // JSON
+  conclusion            String  @default("")
+  sections              String  @default("[]") // JSON
+  confidence            String  @default("{}") // JSON: {diagnosis: 0.7, therapy: 0.6, ...}
+  citations             String  @default("[]") // JSON
+  imageFindings         String  @default("[]") // JSON
+  controlWeights        String  @default("{}") // JSON
+  doctorComments        String  @default("[]") // JSON
+  therapyRecommendations String @default("[]") // JSON
+  ddiAlerts             String  @default("[]") // JSON — Drug-Drug Interaction alerts
+  icd10Suggestions      String  @default("[]") // JSON — AI-suggested ICD-10 codes
+  pathwayMatches        String  @default("[]") // JSON — Matched clinical pathways
+  // v5.0: structured clinical data (differential diagnoses, workup plan,
+  // therapy options, monitoring markers, self-verification report) — JSON:
+  // { differential: [], workupPlan: [], therapyOptions: [], monitoringPlan: [], verification: {} }
+  structured            String  @default("{}")
+  version               Int     @default(1)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  case Case @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  versions AnalysisVersion[]
+
+  @@map("analysis_results")
+}
+
+// NEW: Analysis version history
+model AnalysisVersion {
+  id            String   @id @default(cuid())
+  analysisId    String
+  version       Int
+  snapshot      String   // JSON — full snapshot of AnalysisResult at that version
+  changeNote    String   @default("")
+  doctorId      String?
+  createdAt     DateTime @default(now())
+
+  analysis AnalysisResult @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  @@unique([analysisId, version])
+  @@map("analysis_versions")
+}
+
+model Report {
+  id         String   @id @default(cuid())
+  caseId     String
+  doctorId   String?
+  title      String
+  content    String   @default("{}") // JSON
+  pdfPath    String?
+  status     String   @default("draft") // draft | approved | signed
+  watermark  String   @default("СППВР | КОНФИДЕНЦИАЛЬНО")
+  templateId String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  case       Case           @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  doctor     Doctor?         @relation(fields: [doctorId], references: [id], onDelete: SetNull)
+  template   ReportTemplate? @relation(fields: [templateId], references: [id])
+  signatures ReportSignature[]
+
+  @@index([caseId])
+  @@index([doctorId])
+  @@index([status])
+  @@map("reports")
+}
+
+// NEW: Electronic signature for reports
+model ReportSignature {
+  id          String   @id @default(cuid())
+  reportId    String
+  doctorId    String?
+  signatureType String @default("approval") // approval | review | cosign
+  comment     String   @default("")
+  signedAt    DateTime @default(now())
+
+  report Report @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  doctor Doctor? @relation(fields: [doctorId], references: [id], onDelete: SetNull)
+
+  @@index([reportId])
+  @@map("report_signatures")
+}
+
+// ============================================================================
+// Knowledge Base & Clinical Decision Support
+// ============================================================================
+
+model ClinicalRecommendation {
+  id            String   @id @default(cuid())
+  title         String
+  category      String   // oncology | pharmacogenomics | cardiology | rare_diseases
+  gene          String?
+  mutation      String?
+  content       String
+  keywords      String   @default("")
+  source        String   @default("")
+  evidenceLevel String   @default("C") // A | B | C | D
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([category])
+  @@index([gene])
+  @@map("clinical_recommendations")
+}
+
+// NEW v2.1.4: Knowledge documents uploaded by the user (clinical guidelines,
+// protocols, journal articles). These are parsed (PDF/DOCX/TXT) and their
+// text is stored for full-text search and as a RAG source.
+model KnowledgeDocument {
+  id            String   @id @default(cuid())
+  title         String
+  fileName      String
+  fileType      String   // pdf | docx | txt | md | html
+  mimeType      String   @default("application/octet-stream")
+  fileSize      Int      @default(0)
+  rawText       String   @default("") // extracted plain text
+  deidText      String   @default("") // de-identified text (NER applied)
+  category      String   @default("general") // oncology | pharmacogenomics | cardiology | rare_diseases | general
+  tags          String   @default("[]") // JSON array of string tags
+  source        String   @default("") // optional citation/source URL
+  storagePath   String?  // path in private-storage if file is kept on disk
+  chunkCount    Int      @default(0)
+  isActive      Boolean  @default(true)
+  uploadedById  String?  // doctor who uploaded
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([category])
+  @@index([createdAt])
+  @@map("knowledge_documents")
+}
+
+// NEW: ICD-10 reference data
+model ICD10Code {
+  id          String   @id @default(cuid())
+  code        String   @unique // e.g. C50.1, E11.9
+  description String
+  chapter     String   // e.g. "Новообразования"
+  block       String   // e.g. "C50-C50 Злокачественные новообразования молочной железы"
+  parentCode  String?  // For hierarchical codes
+  createdAt   DateTime @default(now())
+
+  @@map("icd10_codes")
+}
+
+// NEW: Drug-Drug Interaction database
+model DrugInteraction {
+  id              String   @id @default(cuid())
+  drug1           String   // First drug name
+  drug2           String   // Second drug name
+  severity        String   // contraindication | major | moderate | minor
+  description     String   // Clinical description
+  mechanism       String   @default("") // Pharmacological mechanism
+  management      String   @default("") // How to manage
+  evidenceLevel   String   @default("C") // A | B | C | D
+  source          String   @default("")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([drug1, drug2])
+  @@map("drug_interactions")
+}
+
+// v5.0: Кэш результатов ПОТОКОВОГО ОНЛАЙН-ПОИСКА взаимодействий
+// в российских базах данных (РЛС, Vidal, ГРЛС, КР Минздрава РФ).
+// Ключ — хеш отсортированной пары МНН. TTL управляется приложением (7 дней).
+model DdiOnlineCache {
+  id          String   @id @default(cuid())
+  cacheKey    String   @unique // sha1(sorted pair inn lowercase)
+  drugA       String   // МНН препарата A (нормализованное)
+  drugB       String   // МНН препарата B (нормализованное)
+  payload     String   // JSON: { alerts: OnlineDDIAlert[], sources: SourceRef[] }
+  hitCount    Int      @default(1)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("ddi_online_cache")
+}
+
+// NEW: Clinical Pathways / Protocols
+model ClinicalPathway {
+  id          String   @id @default(cuid())
+  name        String
+  icd10Code   String?  // Linked ICD-10 code
+  category    String   // oncology | cardiology | pharmacogenomics | rare_diseases
+  description String
+  steps       String   @default("[]") // JSON: [{order, title, description, duration, criteria}]
+  criteria    String   @default("{}") // JSON: inclusion/exclusion criteria
+  medications String   @default("[]") // JSON: recommended medications
+  monitoring  String   @default("[]") // JSON: monitoring parameters
+  source      String   @default("")
+  version     String   @default("1.0")
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("clinical_pathways")
+}
+
+// ============================================================================
+// Compliance & Security (ФЗ-152)
+// ============================================================================
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  action    String
+  details   String   @default("{}") // JSON
+  caseId    String?
+  doctorId  String?
+  ipAddress String?  // IP address tracking
+  userAgent String?  // User agent tracking
+  // WORM integrity (v2.1): each row links to the previous row via prevHash
+  // and carries its own hash = SHA-256(prevHash || canonical(row fields)).
+  // This makes tampering detectable: changing any field breaks the chain.
+  // Compliance: ФЗ-152 ст. 18 ч. 3, HIPAA §164.312(c) (integrity).
+  // `hash` defaults to "" so existing pre-v2.1 rows survive the migration;
+  // new rows always get a real hash from appendAudit().
+  prevHash  String?  // hash of the immediately preceding AuditLog row
+  hash      String   @default("") // SHA-256 of this row's canonical content
+  createdAt DateTime @default(now())
+
+  case    Case?   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  // v2.1.5 FIX: AuditLog.doctor uses `onDelete: SetNull` (NOT Cascade).
+  // Audit logs are WORM compliance records (ФЗ-152 ст. 18 ч. 3, HIPAA
+  // §164.312(c)) — they MUST survive doctor deletion. Previously Cascade
+  // deleted all of a doctor's audit log rows when the doctor was deleted,
+  // which broke the hash-chain (prevHash pointed to deleted rows) and
+  // caused `verifyAuditChain` to return `ok:false`. Now the doctorId is
+  // simply set to NULL, preserving both the row and the chain integrity.
+  doctor  Doctor? @relation(fields: [doctorId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([doctorId])
+  @@index([action])
+  @@map("audit_logs")
+}
+
+// NEW: Patient consent management (ФЗ-152)
+model Consent {
+  id          String   @id @default(cuid())
+  caseId      String
+  doctorId    String?
+  consentType String   // data_processing | ai_analysis | genetic_analysis | report_sharing | data_retention
+  granted     Boolean
+  notes       String   @default("")
+  validUntil  DateTime? // Expiration date
+  createdAt   DateTime @default(now())
+
+  case    Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  doctor  Doctor? @relation(fields: [doctorId], references: [id], onDelete: SetNull)
+
+  @@index([caseId])
+  @@index([doctorId])
+  @@map("consents")
+}
+
+model SystemLog {
+  id        String   @id @default(cuid())
+  level     String   // debug | info | warn | error
+  category  String   // system | ai | analysis | pdf | auth | storage | api | general
+  message   String
+  details   String   @default("{}")
+  createdAt DateTime @default(now())
+
+  @@map("system_logs")
+}
+
+// ============================================================================
+// Collaboration & Communication
+// ============================================================================
+
+model CaseShare {
+  id           String   @id @default(cuid())
+  caseId       String
+  fromDoctorId String?
+  toDoctorId   String?
+  accessLevel  String   @default("read") // read | comment
+  message      String?
+  status       String   @default("active") // active | revoked
+  createdAt    DateTime @default(now())
+
+  case       Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  fromDoctor Doctor? @relation("SentShares", fields: [fromDoctorId], references: [id], onDelete: SetNull)
+  toDoctor   Doctor? @relation("ReceivedShares", fields: [toDoctorId], references: [id], onDelete: SetNull)
+
+  @@index([caseId])
+  @@index([toDoctorId])
+  @@map("case_shares")
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  doctorId  String?
+  type      String   // analysis_complete | report_approved | case_shared | warning | system | ddi_alert | consent_required
+  title     String
+  message   String
+  caseId    String?
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  doctor Doctor? @relation(fields: [doctorId], references: [id], onDelete: SetNull)
+
+  @@index([doctorId])
+  @@index([isRead])
+  @@map("notifications")
+}
+
+// ============================================================================
+// Templates & Configuration
+// ============================================================================
+
+model ReportTemplate {
+  id          String   @id @default(cuid())
+  name        String
+  description String   @default("")
+  category    String   @default("general")
+  sections    String   @default("[]") // JSON
+  watermark   String   @default("СППВР | КОНФИДЕНЦИАЛЬНО")
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  reports     Report[]
+
+  @@map("report_templates")
+}
+
+// ============================================================================
+// Electronic Medical Record (EMR) — v2.5.0
+// Полноценная медицинская карта пациента: демография, визиты, жизненные
+// показатели, медикаменты, аллергии, прививки, лабораторные исследования,
+// проблемы, планы ведения. Связана с Case (AI-анализ) через patientId.
+// ============================================================================
+
+// Пациент — основная запись медицинской карты. Хранит псевдоним (ФЗ-152),
+// демографию и контактные данные. Один пациент может иметь несколько Case
+// (повторные обращения для ИИ-анализа).
+model Patient {
+  id              String   @id @default(cuid())
+  patientToken    String   @unique // Псевдоним (ФЗ-152) — например "П-2024-0001"
+  // E2EE (v2.6): прямые идентификаторы пациента шифруются в браузере врача
+  // каскадом AES-256-GCM-SIV + ChaCha20-Poly1305 ДО отправки на сервер.
+  // Сервер хранит только шифротекст ("enc:v1:...") — zero-knowledge.
+  lastName        String   @default("") // enc:v1:… (каскадное E2EE)
+  firstName       String   @default("") // enc:v1:…
+  middleName      String   @default("") // enc:v1:…
+  birthDate       String?  // enc:v1:… (полная дата — E2EE)
+  birthYear       Int?     // год рождения (открытое поле для возрастной аналитики)
+  phone           String   @default("") // enc:v1:…
+  email           String   @default("") // enc:v1:…
+  address         String   @default("") // enc:v1:…
+  snils           String   @default("") // enc:v1:… (СНИЛС)
+  omiPolicy       String   @default("") // enc:v1:… (полис ОМС)
+  insuranceNumber String   @default("") // enc:v1:… (ДМС)
+  nationality     String   @default("") // enc:v1:…
+  occupation      String   @default("") // enc:v1:… (профессия)
+  notes           String   @default("") // enc:v1:…
+  // v2.7: пер-пациентный DEK (PDEK, 64 байта) — этим ключом шифруются все
+  // Tier-1 поля карты. Завёрнут master-DEK владельца (enc:v1:…). Передача
+  // доступа врачу — через PatientAccessGrant (пере-заворачивание под X25519).
+  wrappedPdek     String?  // enc:v1:… (null — легаси-карта на master-DEK владельца)
+  sex             String   @default("") // М | Ж (клиническое, псевдонимизировано токеном)
+  bloodType       String   @default("") // O(I)+, A(II)-, B(III)+, AB(IV)-, unknown
+  height          Int      @default(0) // рост в см (последний)
+  weight          Float    @default(0) // вес в кг (последний)
+  smokingStatus   String   @default("unknown") // never | former | current | unknown
+  alcoholUse      String   @default("unknown") // none | occasional | moderate | heavy | unknown
+  allergies       String   @default("[]") // JSON: [{allergen, reaction, severity, notedAt}] (клиническое — для проверок ЛСВ)
+  chronicDiseases String   @default("[]") // JSON: [{name, icd10, diagnosedAt, status}]
+  familyHistory   String   @default("[]") // JSON: [{relation, condition, notes}]
+  status          String   @default("active") // active | archived | deceased
+  deathDate       DateTime?
+  primaryDoctorId String?  // лечащий врач
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  primaryDoctor   Doctor?  @relation("PatientPrimaryDoctor", fields: [primaryDoctorId], references: [id], onDelete: SetNull)
+  visits          Visit[]
+  vitalSigns      VitalSign[]
+  medications     Medication[]
+  immunizations   Immunization[]
+  labResults      LabResult[]
+  problems        Problem[]
+  carePlans       CarePlan[]
+  examinations    Examination[]
+  cases           Case[]   @relation("PatientCases")
+  accessGrants    PatientAccessGrant[]
+
+  @@index([primaryDoctorId])
+  @@index([status])
+  @@index([birthYear])
+  @@map("patients")
+}
+
+// ============================================================================
+// E2EE (v2.6): материал ключа шифрования врача
+// ============================================================================
+// Хранит ТОЛЬКО шифротекст: DEK (64 байта) завёрнут KEK, выведенным из пароля
+// врача через Argon2id В БРАУЗЕРЕ. Сервер никогда не видит ни пароль, ни KEK,
+// ни DEK (zero-knowledge). Данные пациентов шифруются DEK каскадом
+// AES-256-GCM-SIV + ChaCha20-Poly1305 на этапе ввода.
+//
+// v2.7 — ПЕР-ПАЦИЕНТНЫЕ DEK + KEY-WRAPPING (передача карт между врачами):
+//   wrapPubKey     — публичный ключ X25519 врача (base64, открытое поле —
+//                    нужен любому врачу, чтобы ЗАВЕРНУТЬ PDEK для получателя)
+//   wrappedWrapKey — приватный ключ X25519, завёрнутый master-DEK врача
+//                    (enc:v1:…; разворачивается в браузере после unlock).
+// PDEK пациента заворачивается ключом ECDH(myWrapPriv, ихWrapPub) → HKDF-SHA256,
+// поэтому передающая сторона не раскрывает ни свой master-DEK, ни PDEK в явном виде.
+model DoctorKeyMaterial {
+  id             String   @id @default(cuid())
+  doctorId       String   @unique
+  wrappedDek     String   // enc:v1:… — DEK, завёрнутый KEK (Argon2id от пароля)
+  kdfSalt        String   // base64(16 байт) — соль Argon2id
+  kdfParamsJson  String   // {"memoryKiB":…,"iterations":…,"parallelism":…}
+  checkBlob      String   // enc:v1:… — верификационный блоб для проверки KEK
+  wrapPubKey     String?  // base64(32 байта) — публичный X25519 (v2.7, открытое поле)
+  wrappedWrapKey String?  // enc:v1:… — приватный X25519, завёрнутый master-DEK (v2.7)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  doctor         Doctor   @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+
+  @@map("doctor_key_material")
+}
+
+// ============================================================================
+// v2.7 — ПЕРЕДАЧА ДОСТУПА К КАРТЕ ПАЦИЕНТА (PatientAccessGrant)
+// ============================================================================
+// Владелец карты расшифровывает PDEK своим master-DEK в браузере и
+// пере-заворачивает его под публичный X25519-ключ врача-получателя:
+//   KEK_grant = HKDF-SHA256( X25519(myWrapPriv, granteeWrapPub), salt, "SPPVR-GRANT-V1" )
+//   wrappedPdek = enc:v1:<PDEK, завёрнутый KEK_grant>
+// Сервер хранит только шифротекст; PDEK и master-DEK владельца не раскрываются.
+// Отзыв (revoke): status=revoked — доступ отзывается мгновенно на сервере.
+// v2.7.1 — TTL: expiresAt (null = бессрочно). Истёкший grant помечается
+// status=expired лениво при первом обращении (аудит patient.grant.expire).
+// Принцип «минимально необходимого» (HIPAA §164.502(b)): доступ выдаётся
+// на ограниченный срок — 24 ч / 7 д / 30 д / бессрочно (не > 1 года).
+model PatientAccessGrant {
+  id              String    @id @default(cuid())
+  patientId       String
+  grantorDoctorId String    // кто передал (владелец/админ)
+  granteeDoctorId String    // кому передано
+  wrappedPdek     String    // enc:v1:… — PDEK под ключом ECDH(владелец→получатель)
+  grantorWrapPub  String    // base64(32) — публичный X25519 передающего (для вывода общего секрета)
+  status          String    @default("active") // active | revoked | expired
+  createdAt       DateTime  @default(now())
+  expiresAt       DateTime? // null = бессрочно; иначе момент автоматической блокировки
+  revokedAt       DateTime?
+
+  patient         Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  grantor         Doctor    @relation("GrantsGrantor", fields: [grantorDoctorId], references: [id], onDelete: Cascade)
+  grantee         Doctor    @relation("GrantsGrantee", fields: [granteeDoctorId], references: [id], onDelete: Cascade)
+
+  @@unique([patientId, granteeDoctorId])
+  @@index([granteeDoctorId, status])
+  @@map("patient_access_grants")
+}
+
+// Визит / приём пациента. Связан с пациентом и врачом. Может ссылаться на Case
+// (если визит привёл к ИИ-анализу).
+model Visit {
+  id            String   @id @default(cuid())
+  patientId     String
+  doctorId      String?
+  caseId        String?  // связанный случай анализа (опционально)
+  visitType     String   @default("outpatient") // outpatient | inpatient | emergency | telemedicine | home | consultation
+  status        String   @default("scheduled") // scheduled | in_progress | completed | cancelled | no_show
+  chiefComplaint String  @default("") // жалобы
+  visitReason   String   @default("") // цель визита
+  soapSubjective String  @default("") // S — субъективно (анамнез)
+  soapObjective  String   @default("") // O — объективно (осмотр)
+  soapAssessment String  @default("") // A — оценка/диагноз
+  soapPlan       String   @default("") // P — план
+  diagnosis      String   @default("[]") // JSON: [{icd10, description, type: main|concomitant|complication}]
+  prescriptions  String   @default("[]") // JSON: выданные назначения
+  scheduledAt    DateTime
+  startedAt      DateTime?
+  completedAt    DateTime?
+  durationMin    Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  patient    Patient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  doctor     Doctor?  @relation(fields: [doctorId], references: [id], onDelete: SetNull)
+  case       Case?   @relation("VisitCase", fields: [caseId], references: [id], onDelete: SetNull)
+  vitalSigns VitalSign[]
+  medications Medication[]
+  immunizations Immunization[]
+  labResults LabResult[]
+  examinations Examination[] @relation("VisitExaminations")
+
+  @@index([patientId])
+  @@index([doctorId])
+  @@index([scheduledAt])
+  @@index([status])
+  @@map("visits")
+}
+
+// Жизненные показатели (vital signs) — серия наблюдений во времени.
+// Позволяет строить тренды артериального давления, пульса, веса и т.д.
+model VitalSign {
+  id            String   @id @default(cuid())
+  patientId     String
+  visitId       String?  // связь с визитом (опционально)
+  recordedAt    DateTime @default(now())
+  // Базовые показатели
+  systolicBP    Int      @default(0) // систолическое АД, мм рт.ст.
+  diastolicBP   Int      @default(0) // диастолическое АД
+  heartRate     Int      @default(0) // ЧСС, уд/мин
+  respiratoryRate Int    @default(0) // ЧДД, /мин
+  temperature   Float    @default(0) // °C
+  oxygenSaturation Int   @default(0) // SpO₂, %
+  // Антропометрия
+  height        Int      @default(0) // см
+  weight        Float    @default(0) // кг
+  bmi           Float    @default(0) // рассчитанный ИМТ
+  waistCircumference Float @default(0) // окружность талии, см
+  // Доп. показатели
+  glucose       Float    @default(0) // глюкоза, ммоль/л (экспресс)
+  painScore     Int      @default(0) // 0-10 шкала боли
+  consciousness String   @default("") // GCS / AVPU / ясный
+  notes         String   @default("")
+  recordedById  String?  // кто измерил (врач/медсестра)
+  createdAt     DateTime @default(now())
+
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  visit     Visit?  @relation(fields: [visitId], references: [id], onDelete: SetNull)
+  recordedBy Doctor? @relation("VitalSignRecorder", fields: [recordedById], references: [id], onDelete: SetNull)
+
+  @@index([patientId])
+  @@index([recordedAt])
+  @@map("vital_signs")
+}
+
+// Медикаментозная терапия пациента — текущие и исторические назначения.
+// Связь с DDI через drug name (string match).
+model Medication {
+  id            String   @id @default(cuid())
+  patientId     String
+  visitId       String?  // связь с визитом
+  drugName      String   // Международное непатентованное (МНН)
+  brandName     String   @default("") // торговое название
+  form          String   @default("tablet") // tablet | capsule | solution | injection | ointment | drops | inhaler | other
+  dosage        String   @default("") // "500 мг"
+  route         String   @default("oral") // oral | iv | im | sc | topical | inhalation | rectal | sublingual
+  frequency     String   @default("") // "2 раза в день"
+  duration      String   @default("") // "7 дней"
+  startDate     DateTime @default(now())
+  endDate       DateTime?
+  status        String   @default("active") // active | completed | discontinued | on_hold
+  indication    String   @default("") // показание
+  prescriberId  String?
+  notes         String   @default("")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  visit     Visit?  @relation(fields: [visitId], references: [id], onDelete: SetNull)
+  prescriber Doctor? @relation("MedicationPrescriber", fields: [prescriberId], references: [id], onDelete: SetNull)
+
+  @@index([patientId])
+  @@index([status])
+  @@index([startDate])
+  @@map("medications")
+}
+
+// Прививки / иммунизация
+model Immunization {
+  id            String   @id @default(cuid())
+  patientId     String
+  visitId       String?
+  vaccineName   String   // название вакцины
+  vaccineCode   String   @default("") // код (напр. ATC, CVX)
+  targetDisease String   @default("") // против чего
+  doseNumber    Int      @default(1) // 1-я, 2-я доза
+  series        String   @default("") // серия вакцины
+  manufacturer  String   @default("")
+  lotNumber     String   @default("")
+  route         String   @default("im") // im | sc | id | oral | intranasal
+  site          String   @default("") // место введения
+  administeredAt DateTime @default(now())
+  administeredById String?
+  nextDoseDate  DateTime? // дата следующей прививки
+  reaction      String   @default("") // реакция/осложнение
+  notes         String   @default("")
+  createdAt     DateTime @default(now())
+
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  visit     Visit?  @relation(fields: [visitId], references: [id], onDelete: SetNull)
+  administeredBy Doctor? @relation("ImmunizationAdmin", fields: [administeredById], references: [id], onDelete: SetNull)
+
+  @@index([patientId])
+  @@index([administeredAt])
+  @@map("immunizations")
+}
+
+// Лабораторные результаты — структурные данные (не просто текст документа).
+// Позволяет строить тренды: динамика HbA1c, креатинина, липидограммы и т.д.
+model LabResult {
+  id            String   @id @default(cuid())
+  patientId     String
+  visitId       String?
+  testName      String   // напр. "Гемоглобин", "Глюкоза"
+  testCode      String   @default("") // LOINC / код
+  category      String   @default("general") // hematology | biochemistry | electrolytes | lipids | endocrinology | coagulation | immunology | urinalysis | microbiology
+  value         String   // значение (строка — для поддержки "<0.1", "positive")
+  numericValue  Float?   // числовое значение для трендов (null если нечисловой)
+  unit          String   @default("") // единицы измерения
+  refRangeLow   Float?   // нижняя граница нормы
+  refRangeHigh  Float?   // верхняя граница нормы
+  flag          String   @default("normal") // normal | low | high | critical | abnormal
+  method        String   @default("") // метод исследования
+  specimen      String   @default("") // биоматериал
+  collectedAt   DateTime @default(now()) // дата взятия биоматериала
+  resultedAt    DateTime? // дата готовности
+  labName       String   @default("")
+  notes         String   @default("")
+  createdAt     DateTime @default(now())
+
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  visit     Visit?  @relation(fields: [visitId], references: [id], onDelete: SetNull)
+
+  @@index([patientId])
+  @@index([collectedAt])
+  @@index([testName])
+  @@map("lab_results")
+}
+
+// Проблемный список (Problem list) — активные и разрешённые проблемы пациента.
+model Problem {
+  id            String   @id @default(cuid())
+  patientId     String
+  title         String   // название проблемы/диагноза
+  icd10         String   @default("") // код МКБ-10
+  category      String   @default("general") // chronic | acute | recurring | resolved
+  status        String   @default("active") // active | resolved | chronic | controlled | uncontrolled
+  severity      String   @default("mild") // mild | moderate | severe | critical
+  onsetDate     DateTime?
+  resolvedDate  DateTime?
+  description   String   @default("")
+  notes         String   @default("")
+  isPrimary     Boolean  @default(false) // основное заболевание
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  carePlans CarePlan[]
+
+  @@index([patientId])
+  @@index([status])
+  @@map("problems")
+}
+
+// План ведения (Care Plan) — долгосрочный план лечения/наблюдения.
+model CarePlan {
+  id            String   @id @default(cuid())
+  patientId     String
+  problemId     String?  // связан с конкретной проблемой (опционально)
+  title         String
+  type          String   @default("treatment") // treatment | monitoring | prevention | rehabilitation | palliative
+  status        String   @default("active") // draft | active | completed | on_hold | cancelled
+  goals         String   @default("[]") // JSON: [{description, target, deadline, achieved}]
+  interventions String  @default("[]") // JSON: [{description, frequency, duration, status}]
+  startDate     DateTime @default(now())
+  endDate       DateTime?
+  doctorId      String?
+  notes         String   @default("")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  problem   Problem? @relation(fields: [problemId], references: [id], onDelete: SetNull)
+  doctor    Doctor?  @relation("CarePlanAuthor", fields: [doctorId], references: [id], onDelete: SetNull)
+
+  @@index([patientId])
+  @@index([status])
+  @@map("care_plans")
+}
+
+// ============================================================================
+// ОБСЛЕДОВАНИЯ (v4.1) — раздел мед. карты «Обследования»
+// Регистрирует ВСЕ обследования, назначенные пациенту: лабораторные,
+// инструментальные, консультации специалистов и иные исследования.
+// Жизненный цикл: ordered (назначено) → scheduled (запланировано) →
+// in_progress (проводится) → completed (проведено, есть результат) /
+// cancelled (отменено). Поддерживается приоритет (рутинно/срочно/cito),
+// связь с визитом/кейсом ИИ-анализа, код МКБ-10 показания и ссылка на
+// официальную клиническую рекомендацию Минздрава РФ (clinrecCodeVersion),
+// по которой обследование назначено.
+// ============================================================================
+model Examination {
+  id              String    @id @default(cuid())
+  patientId       String
+  visitId         String?   // связь с визитом (опционально)
+  caseId          String?   // связь с кейсом ИИ-анализа (опционально)
+  name            String    // название обследования, напр. «МРТ головного мозга»
+  examType        String    @default("laboratory") // laboratory | instrumental | consultation | functional | radiology | endoscopy | morphological | other
+  modality        String    @default("") // подтип/модальность: УЗИ, КТ, МРТ, ЭКГ, ЭГДС…
+  code            String    @default("") // код исследования (LOINC / код ОМС 1.2.643…)
+  status          String    @default("ordered") // ordered | scheduled | in_progress | completed | cancelled
+  priority        String    @default("routine") // routine | urgent | stat
+  indication      String    @default("") // показание / диагноз (МКБ)
+  icd10           String    @default("") // код МКБ-10 показания
+  orderedAt       DateTime  @default(now()) // дата назначения
+  scheduledAt     DateTime? // плановая дата проведения
+  completedAt     DateTime? // фактическая дата проведения
+  performedAt     String    @default("") // место проведения (клиника/отделение)
+  orderedById     String?   // назначивший врач
+  performedById   String?   // врач, выполнивший/интерпретировавший
+  // Результаты
+  resultValue     String    @default("") // итоговое значение/заключение (текст)
+  resultData      String    @default("[]") // JSON: [{parameter, value, unit, refLow, refHigh, flag}]
+  interpretation  String    @default("") // клиническая интерпретация
+  conclusion      String    @default("") // заключение врача
+  isAbnormal      Boolean   @default(false) // есть отклонения от нормы
+  // Связь с официальной КР Минздрава (cr.minzdrav.gov.ru)
+  clinrecCodeVersion String @default("") // напр. "286_3" — код_версия КР
+  clinrecName     String    @default("") // название КР
+  clinrecMkb      String    @default("") // МКБ из КР
+  // Вложения/документы
+  attachments     String    @default("[]") // JSON: [{fileName, storagePath, mimeType}]
+  notes           String    @default("")
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  patient     Patient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  visit       Visit?  @relation("VisitExaminations", fields: [visitId], references: [id], onDelete: SetNull)
+  case        Case?   @relation("CaseExaminations", fields: [caseId], references: [id], onDelete: SetNull)
+  orderedBy   Doctor? @relation("ExaminationOrderer", fields: [orderedById], references: [id], onDelete: SetNull)
+  performedBy Doctor? @relation("ExaminationPerformer", fields: [performedById], references: [id], onDelete: SetNull)
+
+  @@index([patientId])
+  @@index([status])
+  @@index([examType])
+  @@index([orderedAt])
+  @@index([scheduledAt])
+  @@map("examinations")
+}
+
+// ============================================================================
+// КЭШ ОФИЦИАЛЬНЫХ КЛИНИЧЕСКИХ РЕКОМЕНДАЦИЙ МИНЗДРАВА РФ (v4.1)
+// Персистентный кэш ответов apicr.minzdrav.gov.ru (репозиторий
+// cr.minzdrav.gov.ru/clin-rec). Хранит результаты поиска, полные тексты КР
+// и справочник МКБ, чтобы система работала даже при отсутствии интернета
+// (офлайн-режим на локальном ПК врача).
+// ============================================================================
+model MinzdravCache {
+  id        String   @id @default(cuid())
+  cacheKey  String   @unique // напр. "search:диабет:1:10", "full:286_3", "mkbref"
+  kind      String   // search | full | mkbref | nko
+  payload   String   // JSON-ответ API Минздрава
+  fetchedAt DateTime @default(now())
+  expiresAt DateTime  // TTL: список 24ч, полный текст 7 дней, МКБ 30 дней
+
+  @@index([kind])
+  @@index([expiresAt])
+  @@map("minzdrav_cache")
+}

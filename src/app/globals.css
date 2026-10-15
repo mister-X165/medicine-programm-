@@ -1,0 +1,326 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  --radius: 0.625rem;
+  --background: oklch(0.995 0.004 190);
+  --foreground: oklch(0.18 0.02 220);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.18 0.02 220);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.18 0.02 220);
+  /* v4.1: медицинская бирюзовая палитра — clinical teal */
+  --primary: oklch(0.52 0.11 190);
+  --primary-foreground: oklch(0.985 0.005 190);
+  --secondary: oklch(0.96 0.012 190);
+  --secondary-foreground: oklch(0.3 0.04 190);
+  --muted: oklch(0.96 0.008 190);
+  --muted-foreground: oklch(0.52 0.02 220);
+  --accent: oklch(0.94 0.03 185);
+  --accent-foreground: oklch(0.3 0.05 190);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.91 0.015 190);
+  --input: oklch(0.91 0.015 190);
+  --ring: oklch(0.52 0.11 190);
+  --chart-1: oklch(0.55 0.15 195);
+  --chart-2: oklch(0.6 0.14 165);
+  --chart-3: oklch(0.646 0.222 41.116);
+  --chart-4: oklch(0.828 0.189 84.429);
+  --chart-5: oklch(0.769 0.188 70.08);
+  --sidebar: oklch(0.985 0.005 190);
+  --sidebar-foreground: oklch(0.18 0.02 220);
+  --sidebar-primary: oklch(0.52 0.11 190);
+  --sidebar-primary-foreground: oklch(0.985 0.005 190);
+  --sidebar-accent: oklch(0.94 0.03 185);
+  --sidebar-accent-foreground: oklch(0.3 0.05 190);
+  --sidebar-border: oklch(0.91 0.015 190);
+  --sidebar-ring: oklch(0.52 0.11 190);
+}
+
+.dark {
+  --background: oklch(0.16 0.015 210);
+  --foreground: oklch(0.96 0.005 190);
+  --card: oklch(0.2 0.018 210);
+  --card-foreground: oklch(0.96 0.005 190);
+  --popover: oklch(0.2 0.018 210);
+  --popover-foreground: oklch(0.96 0.005 190);
+  /* v4.1: тёмная тема — светлая медицинская бирюза */
+  --primary: oklch(0.72 0.11 185);
+  --primary-foreground: oklch(0.16 0.03 200);
+  --secondary: oklch(0.26 0.02 205);
+  --secondary-foreground: oklch(0.96 0.005 190);
+  --muted: oklch(0.25 0.018 205);
+  --muted-foreground: oklch(0.68 0.02 200);
+  --accent: oklch(0.28 0.035 190);
+  --accent-foreground: oklch(0.92 0.03 185);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.72 0.11 185);
+  --chart-1: oklch(0.65 0.14 190);
+  --chart-2: oklch(0.696 0.17 162.48);
+  --chart-3: oklch(0.769 0.188 70.08);
+  --chart-4: oklch(0.627 0.265 303.9);
+  --chart-5: oklch(0.645 0.246 16.439);
+  --sidebar: oklch(0.19 0.018 210);
+  --sidebar-foreground: oklch(0.96 0.005 190);
+  --sidebar-primary: oklch(0.65 0.14 190);
+  --sidebar-primary-foreground: oklch(0.16 0.03 200);
+  --sidebar-accent: oklch(0.28 0.035 190);
+  --sidebar-accent-foreground: oklch(0.92 0.03 185);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.72 0.11 185);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    /* Subtle medical-themed background pattern */
+    background-image:
+      radial-gradient(circle at 1px 1px, oklch(0.5 0.05 220 / 0.04) 1px, transparent 0);
+    background-size: 24px 24px;
+  }
+  .dark body {
+    background-image:
+      radial-gradient(circle at 1px 1px, oklch(0.7 0.05 220 / 0.06) 1px, transparent 0);
+  }
+}
+
+@layer utilities {
+  /* ── Medical accent gradient ──────────────────────────────────────────
+     A subtle teal-to-emerald gradient used for primary action buttons,
+     active states, and header accents. Evokes a clinical/clean feel
+     without being saturated. */
+  .bg-medical-gradient {
+    background-image: linear-gradient(135deg, oklch(0.55 0.15 195) 0%, oklch(0.6 0.14 165) 100%);
+  }
+  .bg-medical-gradient-soft {
+    background-image: linear-gradient(135deg, oklch(0.55 0.15 195 / 0.12) 0%, oklch(0.6 0.14 165 / 0.12) 100%);
+  }
+  .text-medical-gradient {
+    background-image: linear-gradient(135deg, oklch(0.55 0.15 195) 0%, oklch(0.6 0.14 165) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  /* ── Glass card effect ────────────────────────────────────────────────
+     Used for the dashboard's stat cards to add depth without overwhelming. */
+  .glass-card {
+    backdrop-filter: blur(8px);
+    background-image: linear-gradient(135deg, oklch(1 0 0 / 0.6) 0%, oklch(1 0 0 / 0.4) 100%);
+  }
+  .dark .glass-card {
+    background-image: linear-gradient(135deg, oklch(0.3 0 0 / 0.6) 0%, oklch(0.2 0 0 / 0.4) 100%);
+  }
+
+  /* ── Pulse-glow for "analyzing" / "live" states ─────────────────────── */
+  .pulse-glow {
+    animation: pulse-glow 2s ease-in-out infinite;
+  }
+  @keyframes pulse-glow {
+    0%, 100% { box-shadow: 0 0 0 0 oklch(0.6 0.15 195 / 0.4); }
+    50% { box-shadow: 0 0 0 8px oklch(0.6 0.15 195 / 0); }
+  }
+
+  /* ── Slide-in animation for new list items ──────────────────────────── */
+  .animate-slide-in {
+    animation: slide-in 0.3s ease-out;
+  }
+  @keyframes slide-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ── Shimmer for loading skeletons ──────────────────────────────────── */
+  .shimmer {
+    background: linear-gradient(
+      90deg,
+      oklch(0.95 0 0) 25%,
+      oklch(0.9 0 0) 50%,
+      oklch(0.95 0 0) 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+  }
+  .dark .shimmer {
+    background: linear-gradient(
+      90deg,
+      oklch(0.25 0 0) 25%,
+      oklch(0.3 0 0) 50%,
+      oklch(0.25 0 0) 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+  }
+  @keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+}
+
+/* ── Custom scrollbar (medical UI needs to feel polished) ─────────────── */
+@layer base {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: oklch(0.65 0.05 220 / 0.6) oklch(0.85 0.01 220 / 0.4);
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-track {
+    background: oklch(0.85 0.01 220 / 0.4);
+    border-radius: 4px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: oklch(0.65 0.05 220 / 0.55);
+    border-radius: 4px;
+    border: 2px solid oklch(0.85 0.01 220 / 0.4);
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: oklch(0.55 0.1 195 / 0.75);
+    border-color: oklch(0.8 0.01 220 / 0.4);
+  }
+  *::-webkit-scrollbar-corner {
+    background: oklch(0.85 0.01 220 / 0.4);
+  }
+  .dark * {
+    scrollbar-color: oklch(0.5 0.04 220 / 0.5) oklch(0.25 0 0 / 0.4);
+  }
+  .dark *::-webkit-scrollbar-track {
+    background: oklch(0.25 0 0 / 0.4);
+  }
+  .dark *::-webkit-scrollbar-thumb {
+    background-color: oklch(0.5 0.04 220 / 0.45);
+    border-color: oklch(0.25 0 0 / 0.4);
+  }
+  .dark *::-webkit-scrollbar-thumb:hover {
+    background-color: oklch(0.45 0.08 195 / 0.65);
+    border-color: oklch(0.25 0 0 / 0.4);
+  }
+  .dark *::-webkit-scrollbar-corner {
+    background: oklch(0.25 0 0 / 0.4);
+  }
+}
+/* ============================================================================
+   Print styles (v2.5.3) — clean patient summary for printing
+   ========================================================================== */
+@media print {
+  /* Hide navigation, sidebars, and non-essential UI */
+  header,
+  aside,
+  nav,
+  .no-print,
+  [role="region"][aria-label*="Notifications"],
+  button[aria-label*="Open Next.js Dev Tools"] {
+    display: none !important;
+  }
+
+  /* Reset layout for print */
+  body {
+    background: white !important;
+    color: black !important;
+    font-size: 11pt;
+  }
+
+  main {
+    padding: 0 !important;
+  }
+
+  /* Make cards print-friendly */
+  .rounded-2xl,
+  .rounded-xl,
+  .rounded-lg {
+    border-radius: 4px !important;
+  }
+
+  /* Remove gradient backgrounds, use solid colors */
+  [class*="bg-gradient"],
+  [class*="from-emerald"],
+  [class*="from-rose"],
+  [class*="from-sky"],
+  [class*="from-amber"],
+  [class*="from-violet"] {
+    background: white !important;
+    color: black !important;
+    border: 1px solid #ccc !important;
+  }
+
+  /* Ensure text is readable */
+  .text-muted-foreground,
+  .text-muted-foreground\/70 {
+    color: #555 !important;
+  }
+
+  /* Print-friendly badges */
+  [class*="Badge"] {
+    border: 1px solid #999 !important;
+    background: #f5f5f5 !important;
+    color: black !important;
+  }
+
+  /* Page breaks */
+  h1, h2, h3 {
+    page-break-after: avoid;
+  }
+
+  /* Avoid breaking inside cards */
+  [class*="CardContent"] {
+    page-break-inside: avoid;
+  }
+
+  /* Show print header with patient info */
+  .print-only {
+    display: block !important;
+  }
+}
+
+.print-only {
+  display: none;
+}
