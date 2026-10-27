@@ -155,50 +155,70 @@ export async function verifyAuditChain(options?: {
 }): Promise<{
   ok: boolean;
   verified: number;
+  /** true, если проверка остановилась на заданном limit и не дошла до конца журнала. */
+  truncated: boolean;
   brokenAt: { id: string; expectedHash: string; actualHash: string } | null;
 }> {
-  const limit = options?.limit ?? 10000;
-  const rows = await db.auditLog.findMany({
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-    take: limit,
-    select: {
-      id: true,
-      action: true,
-      details: true,
-      caseId: true,
-      doctorId: true,
-      ipAddress: true,
-      userAgent: true,
-      createdAt: true,
-      prevHash: true,
-      hash: true,
-    },
-  });
+  const limit = options?.limit ?? 0; // 0 = весь журнал без ограничения
+  const BATCH = 500;
 
   let prevHash: string | null = null;
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
-    const expected = computeHash(
-      {
-        action: row.action,
-        details: row.details,
-        caseId: row.caseId,
-        doctorId: row.doctorId,
-        ipAddress: row.ipAddress,
-        userAgent: row.userAgent,
-        createdAt: row.createdAt,
+  let verified = 0;
+  let cursor: { createdAt: Date; id: string } | undefined;
+
+  // Курсорная пагинация (батчами) вместо загрузки всего журнала в память:
+  // хеш-цепочка проверяется последовательно, перенося prevHash между батчами.
+  while (true) {
+    const rows = await db.auditLog.findMany({
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: BATCH,
+      ...(cursor ? { cursor, skip: 1 } : {}),
+      select: {
+        id: true,
+        action: true,
+        details: true,
+        caseId: true,
+        doctorId: true,
+        ipAddress: true,
+        userAgent: true,
+        createdAt: true,
+        prevHash: true,
+        hash: true,
       },
-      prevHash,
-    );
-    if (expected !== row.hash || row.prevHash !== prevHash) {
-      return {
-        ok: false,
-        verified: i,
-        brokenAt: { id: row.id, expectedHash: expected, actualHash: row.hash },
-      };
+    });
+    if (rows.length === 0) break;
+
+    for (const row of rows) {
+      const expected = computeHash(
+        {
+          action: row.action,
+          details: row.details,
+          caseId: row.caseId,
+          doctorId: row.doctorId,
+          ipAddress: row.ipAddress,
+          userAgent: row.userAgent,
+          createdAt: row.createdAt,
+        },
+        prevHash,
+      );
+      if (expected !== row.hash || row.prevHash !== prevHash) {
+        return {
+          ok: false,
+          verified,
+          truncated: false,
+          brokenAt: { id: row.id, expectedHash: expected, actualHash: row.hash },
+        };
+      }
+      prevHash = row.hash;
+      verified++;
+      if (limit > 0 && verified >= limit) {
+        return { ok: true, verified, truncated: true, brokenAt: null };
+      }
     }
-    prevHash = row.hash;
+
+    const last = rows[rows.length - 1];
+    cursor = { createdAt: last.createdAt, id: last.id };
   }
 
-  return { ok: true, verified: rows.length, brokenAt: null };
+  return { ok: true, verified, truncated: false, brokenAt: null };
 }

@@ -60,6 +60,30 @@ function registerLimited(ip: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Per-IP login-failure throttle (in-memory; single-process standalone model —
+// same constraint as registerBuckets). Ограничивает брутфорс с одного IP и
+// «массовую блокировку чужих аккаунтов» (lockout-DoS): когда бюджет исчерпан,
+// мы возвращаем 429 ДО инкремента failedLoginAttempts, поэтому аккаунт жертвы
+// не блокируется лавиной чужих попыток.
+// ---------------------------------------------------------------------------
+
+const LOGIN_FAIL_LIMIT = 30;
+const LOGIN_FAIL_WINDOW_MS = 15 * 60 * 1000; // 30 неудач за 15 минут на IP
+
+const loginFailBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function loginFailedLimited(ip: string): boolean {
+  const now = Date.now();
+  const bucket = loginFailBuckets.get(ip);
+  if (!bucket || bucket.resetAt <= now) {
+    loginFailBuckets.set(ip, { count: 1, resetAt: now + LOGIN_FAIL_WINDOW_MS });
+    return false;
+  }
+  bucket.count++;
+  return bucket.count > LOGIN_FAIL_LIMIT;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -79,6 +103,11 @@ interface PasswordCheck {
 function checkPasswordStrength(password: string): PasswordCheck {
   if (password.length < 10) {
     return { ok: false, error: "Пароль должен содержать минимум 10 символов" };
+  }
+  // bcrypt обрезает вход до 72 байт: без этой проверки два разных длинных пароля
+  // давали бы одинаковый хеш (auth bypass). Лимит проверяем по байтам (кириллица = 2 байта).
+  if (Buffer.byteLength(password, "utf8") > 72) {
+    return { ok: false, error: "Пароль слишком длинный (максимум 72 байта)" };
   }
   if (!/[A-Za-zА-Яа-яЁё]/.test(password)) {
     return { ok: false, error: "Пароль должен содержать хотя бы одну букву" };
@@ -160,6 +189,19 @@ export async function POST(req: Request) {
 
       const match = await bcrypt.compare(password, doctor.passwordHash);
       if (!match) {
+        // Per-IP throttle on FAILED logins (before any account mutation) —
+        // blocks brute-force and prevents an attacker from locking out a
+        // victim account via repeated wrong passwords.
+        if (loginFailedLimited(ip)) {
+          return NextResponse.json(
+            {
+              error: "Слишком много неудачных попыток входа с этого адреса. Повторите позже.",
+              code: "RATE_LIMITED",
+            },
+            { status: 429 },
+          );
+        }
+
         // Count the failure; lock the account after MAX_FAILED_ATTEMPTS.
         const attempts = (doctor.failedLoginAttempts || 0) + 1;
         const shouldLock = attempts >= MAX_FAILED_ATTEMPTS;

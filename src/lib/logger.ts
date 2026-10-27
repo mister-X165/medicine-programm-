@@ -19,7 +19,9 @@ export type LogCategory =
   // v5.0: потоковый онлайн-поиск взаимодействий в базах РФ + LM Studio
   | "ddi-online" | "lm-studio"
   // v5.0: международные авторитетные источники (PubMed/ВОЗ/NICE/Cochrane/…)
-  | "intl-rag";
+  | "intl-rag"
+  // v5.x: надёжная JSON-структуризация вывода ИИ
+  | "structured-extraction";
 
 export interface LogEntry {
   id: string;
@@ -41,6 +43,25 @@ export interface LogQueryOptions {
 }
 
 const MAX_LOGS = 10000;
+
+// Ключи, значения которых не должны попадать в system_logs (секреты/токены/ключи).
+const SENSITIVE_KEY_PATTERN =
+  /(password|passwd|secret|token|api[_-]?key|authorization|credential|jwt|encryption[_-]?key|dek|kek)/i;
+
+/** Рекурсивно вычищает значения чувствительных ключей перед записью в БД. */
+function redactSensitive(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(redactSensitive);
+  if (typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = SENSITIVE_KEY_PATTERN.test(k) ? "[REDACTED]" : redactSensitive(v);
+    }
+    return out;
+  }
+  return value;
+}
 
 // Track DB persistence failures — log once, then stay silent to avoid
 // console spam when the database is temporarily unavailable (e.g. during
@@ -77,7 +98,7 @@ async function persist(level: LogLevel, category: LogCategory, message: string, 
         level,
         category,
         message,
-        details: details !== undefined ? JSON.stringify(details) : "{}",
+        details: details !== undefined ? JSON.stringify(redactSensitive(details)) : "{}",
       },
     });
 
@@ -99,7 +120,13 @@ async function persist(level: LogLevel, category: LogCategory, message: string, 
   }
 }
 
+let lastCleanupAt = 0;
+const CLEANUP_INTERVAL_MS = 60 * 1000; // не чаще раза в минуту (раньше — на каждую запись)
+
 async function autoCleanup() {
+  const now = Date.now();
+  if (now - lastCleanupAt < CLEANUP_INTERVAL_MS) return;
+  lastCleanupAt = now;
   try {
     const count = await db.systemLog.count();
     if (count > MAX_LOGS) {

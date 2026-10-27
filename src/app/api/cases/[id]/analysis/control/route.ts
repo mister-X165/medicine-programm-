@@ -16,6 +16,9 @@ import { logger } from "@/lib/logger";
 import { appendAudit } from "@/lib/audit";
 import { requireCaseAccess } from "@/lib/case-access";
 import { controlPanelSchema, validateOrThrow } from "@/lib/validation";
+import { normalizeWorkupKey } from "@/lib/workup";
+import { applyWorkupUpdate } from "@/lib/clinical-normalize";
+import type { WorkupTracker } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -72,8 +75,7 @@ export async function PATCH(
   // `structured.confirmedDx` — UI использует его, чтобы разблокировать
   // TherapyOption'ы с соответствующим `targetDx`. До подтверждения
   // карточки терапии отображаются «замороженными» и недоступны.
-  if (data.confirmDx) {
-    const currentStructured = (() => {
+  if (data.confirmDx) {    const currentStructured = (() => {
       try {
         return existing.structured
           ? (JSON.parse(existing.structured) as {
@@ -126,18 +128,85 @@ export async function PATCH(
     });
   }
 
+  // ─── v5.2: трекер выполнения плана дообследования ────────────────
+  // Статус и результат исследования — часть медицинской документации:
+  // запись серверная, с автором и временем, с записью в аудит.
+  if (data.workup) {
+    const key = normalizeWorkupKey(data.workup.name);
+    if (!key) {
+      return NextResponse.json(
+        { error: "Workup item name does not normalize to a tracking key" },
+        { status: 400 },
+      );
+    }
+
+    // Базовая структура: уже изменённая confirmDx'ом (если пришла в том же
+    // запросе) либо сохранённая в БД.
+    const baseStructured: Record<string, unknown> = (() => {
+      if (typeof updates.structured === "string") {
+        try {
+          return JSON.parse(updates.structured) as Record<string, unknown>;
+        } catch {
+          return {};
+        }
+      }
+      try {
+        return existing.structured
+          ? (JSON.parse(existing.structured) as Record<string, unknown>)
+          : {};
+      } catch {
+        return {};
+      }
+    })();
+
+    const baseTracker = (baseStructured.workupTracker as WorkupTracker | undefined) ?? {};
+    const previous = baseTracker[normalizeWorkupKey(data.workup.name)];
+    const nextStructured = applyWorkupUpdate(baseStructured, {
+      name: data.workup.name,
+      status: data.workup.status,
+      resultValue: data.workup.resultValue,
+      comment: data.workup.comment,
+      updatedBy: session.doctorCode,
+    });
+    const entry = (nextStructured.workupTracker as WorkupTracker | undefined)?.[key];
+
+    updates.structured = JSON.stringify(nextStructured);
+
+    await appendAudit({
+      caseId,
+      doctorId: session.doctorId,
+      action: "workup_status_update",
+      details: JSON.stringify({
+        name: data.workup.name,
+        key,
+        status: entry?.status ?? data.workup.status,
+        resultValue: entry?.resultValue ?? null,
+        previousStatus: previous?.status ?? null,
+        comment: entry?.comment ?? null,
+      }),
+    });
+
+    logger.info("analysis", "Workup status updated", {
+      caseId,
+      key,
+      status: entry?.status ?? data.workup.status,
+      hasResult: !!entry?.resultValue,
+      by: session.doctorCode,
+    });
+  }
+
+
   if (Object.keys(updates).length === 0) {
     return NextResponse.json({ error: "No fields to update" }, { status: 400 });
   }
-
   const updated = await db.analysisResult.update({
     where: { caseId },
     data: updates,
   });
 
   // Audit — attribute to the ACTING doctor (session), not the case owner.
-  // (Skip if confirmDx already audited above to avoid double entries.)
-  if (!data.confirmDx) {
+  // (Skip if confirmDx/workup already audited above to avoid double entries.)
+  if (!data.confirmDx && !data.workup) {
     await appendAudit({
       caseId,
       doctorId: session.doctorId,

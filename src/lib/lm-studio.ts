@@ -231,6 +231,63 @@ export function invalidateLMHealthCache(): void {
   healthCache = null;
 }
 
+// ---------------------------------------------------------------------------
+// Общий чтение SSE-потока (DRY): chat и vision используют один и тот же
+// парсер OpenAI-совместимого text/event-stream. Вызывает onDelta для каждой
+// текстовой дельты и возвращает управление при [DONE], ошибке в потоке или
+// idle-тайм-ауте.
+// ---------------------------------------------------------------------------
+async function readChatStream(
+  body: ReadableStream<Uint8Array>,
+  idleTimeoutMs: number,
+  provider: AIProviderName,
+  onDelta: (text: string) => void,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let lastActivity = Date.now();
+
+  while (true) {
+    if (Date.now() - lastActivity > idleTimeoutMs) {
+      logger.error("lm-studio", "ИИ-сервер: idle-тайм-аут streaming", { provider, idleTimeoutMs });
+      return;
+    }
+    const { done, value } = await reader.read();
+    if (done) return;
+    lastActivity = Date.now();
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || ""; // последняя неполная строка остаётся в буфере
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith("data:")) continue;
+      const data = trimmed.slice(5).trim();
+      if (data === "[DONE]") return;
+      try {
+        const parsed = JSON.parse(data) as {
+          choices?: Array<{ delta?: { content?: string }; finish_reason?: string }>;
+          error?: unknown;
+        };
+        // llama-server может прислать ошибку прямо в потоке — прекращаем
+        if (parsed && typeof parsed === "object" && "error" in parsed && parsed.error) {
+          logger.error("lm-studio", "ИИ-сервер: ошибка в streaming-ответе", {
+            provider,
+            error: typeof parsed.error === "string" ? parsed.error : JSON.stringify(parsed.error).slice(0, 200),
+          });
+          return;
+        }
+        const delta = parsed.choices?.[0]?.delta?.content;
+        if (delta) onDelta(delta);
+      } catch {
+        // Частичный JSON — игнорируем, соберём из следующих чанков
+      }
+    }
+  }
+}
+
 function authHeaders(cfg: LMStudioConfig): Record<string, string> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
@@ -529,69 +586,11 @@ async function lmStudioChatOnce(
       return data.choices?.[0]?.message?.content ?? null;
     }
 
-    // Читаем SSE-поток (Server-Sent Events)
-    // Формат OpenAI streaming: каждая строка "data: {json}\n\n", финал "data: [DONE]"
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
+    // Читаем SSE-поток (Server-Sent Events) общим парсером.
     let fullContent = "";
-    let buffer = "";
-    let lastActivity = Date.now();
-    // Idle-тайм-аут (AI_IDLE_TIMEOUT_MS): если нет новых токенов —
-    // прерываем (модель зависла)
-    const idleTimeoutMs = cfg.idleTimeoutMs;
-
-    while (true) {
-      if (Date.now() - lastActivity > idleTimeoutMs) {
-        logger.error("lm-studio", "ИИ-сервер: idle-тайм-аут streaming", {
-          provider: cfg.provider,
-          timeoutMs: idleTimeoutMs,
-        });
-        break;
-      }
-
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      lastActivity = Date.now();
-      buffer += decoder.decode(value, { stream: true });
-
-      // Обрабатываем все завершённые строки в буфере
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || ""; // последняя неполная строка остаётся в буфере
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith("data:")) continue;
-        const data = trimmed.slice(5).trim();
-        if (data === "[DONE]") {
-          return fullContent || null;
-        }
-        try {
-          const parsed = JSON.parse(data) as {
-            choices?: Array<{
-              delta?: { content?: string };
-              finish_reason?: string;
-            }>;
-            error?: unknown;
-          };
-          // llama-server может прислать ошибку прямо в потоке — прекращаем
-          if (parsed && typeof parsed === "object" && "error" in parsed && parsed.error) {
-            logger.error("lm-studio", "ИИ-сервер: ошибка в streaming-ответе", {
-              provider: cfg.provider,
-              error: typeof parsed.error === "string" ? parsed.error : JSON.stringify(parsed.error).slice(0, 200),
-            });
-            break;
-          }
-          const delta = parsed.choices?.[0]?.delta?.content;
-          if (delta) {
-            fullContent += delta;
-          }
-        } catch {
-          // Частичный JSON — игнорируем, соберём из следующих чанков
-        }
-      }
-    }
-
+    await readChatStream(res.body, cfg.idleTimeoutMs, cfg.provider, (delta) => {
+      fullContent += delta;
+    });
     return fullContent || null;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -673,38 +672,10 @@ export async function lmStudioVision(
       const data = (await res.json()) as LMChatCompletionResponse;
       return data.choices?.[0]?.message?.content ?? null;
     }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
     let fullContent = "";
-    let buffer = "";
-    let lastActivity = Date.now();
-    while (true) {
-      if (Date.now() - lastActivity > cfg.idleTimeoutMs) {
-        logger.error("lm-studio", "ИИ-сервер: idle-тайм-аут vision", { idleTimeoutMs: cfg.idleTimeoutMs });
-        break;
-      }
-      const { done, value } = await reader.read();
-      if (done) break;
-      lastActivity = Date.now();
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith("data:")) continue;
-        const data = trimmed.slice(5).trim();
-        if (data === "[DONE]") return fullContent || null;
-        try {
-          const parsed = JSON.parse(data) as {
-            choices?: Array<{ delta?: { content?: string } }>;
-            error?: unknown;
-          };
-          if (parsed && typeof parsed === "object" && "error" in parsed && parsed.error) break;
-          const delta = parsed.choices?.[0]?.delta?.content;
-          if (delta) fullContent += delta;
-        } catch {}
-      }
-    }
+    await readChatStream(res.body, cfg.idleTimeoutMs, cfg.provider, (delta) => {
+      fullContent += delta;
+    });
     return fullContent || null;
   } catch (e) {
     logger.error("lm-studio", "ИИ-сервер: ошибка vision", {

@@ -1,20 +1,30 @@
 "use client";
 
 import * as React from "react";
+import dynamic from "next/dynamic";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AppShell } from "@/components/app-shell";
 import { AuthGate } from "@/components/auth/auth-gate";
 import { E2EEProvider } from "@/components/e2ee/e2ee-provider";
 import { useAppStore } from "@/lib/store";
-import { Dashboard } from "@/components/views/dashboard";
-import { Analytics } from "@/components/views/analytics";
-import { AuditLog } from "@/components/views/audit-log";
-import { KnowledgeBase } from "@/components/views/knowledge-base";
-import { AdminPanel } from "@/components/views/admin-panel";
-import { About } from "@/components/views/about";
-import { Calculators } from "@/components/views/calculators";
-import { MedicalRecord } from "@/components/views/medical-record";
-import { CaseWorkspace } from "@/components/views/case-workspace";
+
+// Вьюхи подгружаются лениво (code-splitting), чтобы не тянуть весь UI в
+// начальный бандл — каждая грузится только при первом открытии.
+const ViewLoading = () => (
+  <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">
+    Загрузка…
+  </div>
+);
+
+const Dashboard = dynamic(() => import("@/components/views/dashboard").then((m) => m.Dashboard), { loading: ViewLoading });
+const Analytics = dynamic(() => import("@/components/views/analytics").then((m) => m.Analytics), { loading: ViewLoading });
+const AuditLog = dynamic(() => import("@/components/views/audit-log").then((m) => m.AuditLog), { loading: ViewLoading });
+const KnowledgeBase = dynamic(() => import("@/components/views/knowledge-base").then((m) => m.KnowledgeBase), { loading: ViewLoading });
+const AdminPanel = dynamic(() => import("@/components/views/admin-panel").then((m) => m.AdminPanel), { loading: ViewLoading });
+const About = dynamic(() => import("@/components/views/about").then((m) => m.About), { loading: ViewLoading });
+const Calculators = dynamic(() => import("@/components/views/calculators").then((m) => m.Calculators), { loading: ViewLoading });
+const MedicalRecord = dynamic(() => import("@/components/views/medical-record").then((m) => m.MedicalRecord), { loading: ViewLoading });
+const CaseWorkspace = dynamic(() => import("@/components/views/case-workspace").then((m) => m.CaseWorkspace), { loading: ViewLoading });
 
 const queryClient = new QueryClient({
   defaultOptions: {

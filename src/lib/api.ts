@@ -24,7 +24,6 @@ import type {
   ClinicalPathwayRecord,
   ConsentRecord,
   ReportSignatureRecord,
-  AnalysisVersionRecord,
   BackupData,
   KnowledgeSearchResult,
   PatientSummary,
@@ -39,8 +38,9 @@ import type {
   Examination,
   ExaminationStats,
   ExaminationResultParam,
-  ClinrecMatch,
   ClinrecSearchApiResponse,
+  WorkupStatus,
+  WorkupTracker,
   ClinrecFullApiResponse,
   MkbRefItem,
 } from "./types";
@@ -478,6 +478,29 @@ export const api = {
       body: JSON.stringify({ confirmDx: { action, diagnosis, evidence } }),
     }),
 
+  /**
+   * v5.2: трекер выполнения плана дообследования. Статус и результат
+   * сохраняются на сервере (в `structured.workupTracker`) и попадают в аудит —
+   * в отличие от прежней отметки в localStorage, которая терялась при смене
+   * рабочего места.
+   */
+  setWorkupStatus: (
+    caseId: string,
+    payload: {
+      name: string;
+      status: WorkupStatus;
+      resultValue?: string;
+      comment?: string;
+    },
+  ) =>
+    fetchJSON<{
+      analysis: { structured: { workupTracker?: WorkupTracker } | null };
+    }>(`${API_BASE}/cases/${caseId}/analysis/control`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workup: payload }),
+    }),
+
   // Recommendations
   getRecommendations: (params?: { q?: string; gene?: string; category?: string }) =>
     fetchJSON<{ recommendations: Array<Record<string, unknown>>; count: number }>(
@@ -893,7 +916,7 @@ export const api = {
       }),
     ),
   suggestICD10Codes: (data: { diagnosisText: string; entities?: Array<{ type: string; value: string; context?: string }> }) =>
-    fetchJSON<{ suggestions: ICD10CodeMatch[] }>(`${API_BASE}/icd10/suggest`, {
+    fetchJSON<{ suggestions: ICD10CodeMatch[] }>(`${API_BASE}/icd10`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
@@ -957,7 +980,7 @@ export const api = {
       }),
     ),
   matchPathways: (data: { diagnosis?: string; icd10Codes?: ICD10CodeMatch[] }) =>
-    fetchJSON<{ matches: ClinicalPathwayMatch[] }>(`${API_BASE}/pathways/match`, {
+    fetchJSON<{ pathways: ClinicalPathwayMatch[]; count: number }>(`${API_BASE}/pathways`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
@@ -974,14 +997,16 @@ export const api = {
     granted: boolean;
     notes?: string;
     validUntil?: string;
-  }) =>
-    fetchJSON<{ consent: ConsentRecord }>(`${API_BASE}/consents`, {
+  }) => {
+    const { caseId, ...payload } = data;
+    return fetchJSON<{ consent: ConsentRecord }>(`${API_BASE}/cases/${caseId}/consents`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
-    }),
-  updateConsent: (id: string, data: { granted?: boolean; notes?: string; validUntil?: string }) =>
-    fetchJSON<{ consent: ConsentRecord }>(`${API_BASE}/consents/${id}`, {
+      body: JSON.stringify(payload),
+    });
+  },
+  updateConsent: (caseId: string, data: { consentType: ConsentRecord["consentType"]; granted?: boolean; notes?: string; validUntil?: string | null }) =>
+    fetchJSON<{ consent: ConsentRecord }>(`${API_BASE}/cases/${caseId}/consents`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
@@ -1011,12 +1036,15 @@ export const api = {
   // ==========================================================================
   // NEW v2.0: Analysis Version History
   // ==========================================================================
-  getAnalysisVersions: (analysisId: string) =>
-    fetchJSON<{ versions: AnalysisVersionRecord[] }>(`${API_BASE}/analysis/${analysisId}/versions`),
-  getAnalysisVersion: (analysisId: string, version: number) =>
-    fetchJSON<{ version: AnalysisVersionRecord }>(
-      `${API_BASE}/analysis/${analysisId}/versions/${version}`,
-    ),
+  // The real route is /api/cases/[caseId]/analysis/versions (case-scoped, not
+  // analysisId-scoped) and returns full parsed snapshots plus a synthetic
+  // "current" entry so the UI can diff previous → current client-side.
+  getAnalysisVersions: (caseId: string) =>
+    fetchJSON<{
+      versions: Array<Record<string, unknown>>;
+      currentVersion: number;
+      totalVersions: number;
+    }>(`${API_BASE}/cases/${caseId}/analysis/versions`),
 
   // ==========================================================================
   // Audit Export (server-side) + Hash-chain verification
@@ -1090,6 +1118,7 @@ export const api = {
     fetchJSON<{
       ok: boolean;
       verified: number;
+      truncated: boolean;
       brokenAt: { id: string; expectedHash: string; actualHash: string } | null;
       checkedAt: string;
     }>(`${API_BASE}/audit/verify`),

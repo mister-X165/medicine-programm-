@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import * as React from "react";
 import {
@@ -23,12 +23,14 @@ import {
   ListTree,
   HeartPulse,
   AlignLeft,
-  ChevronDown,
   ChevronRight,
   Check,
   X,
   Globe,
   Search,
+  LayoutDashboard,
+  ScanSearch,
+  Copy,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -37,11 +39,8 @@ import type {
   AnalysisResultData,
   Citation,
   DDIAlert,
-  ICD10CodeMatch,
-  ClinicalPathwayMatch,
   DifferentialDiagnosis,
   TherapyOption,
-  WorkupItem,
 } from "@/lib/types";
 import { api } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
@@ -49,7 +48,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Accordion,
@@ -58,9 +56,6 @@ import {
   AccordionTrigger,
 } from "@/components/ui/accordion";
 import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import {
   Dialog,
@@ -79,6 +74,12 @@ import {
 } from "@/components/ui/tooltip";
 import { cn, formatDateTime } from "@/lib/utils";
 import { VersionHistoryDialog } from "@/components/shared/version-history-dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { WorkupPlanTracker } from "@/components/shared/workup-tracker";
+import { AnalysisAuditPanel } from "@/components/shared/analysis-audit-panel";
+import { auditAnalysis } from "@/lib/clinical-audit";
+import { workupKey, workupProgress, workupStatusMeta } from "@/lib/workup";
+import { hypothesesLabel, therapyOptionsLabel } from "@/lib/plural";
 
 const MIN_REASON_LENGTH = 10;
 
@@ -145,13 +146,6 @@ function dxKey(dx: DifferentialDiagnosis, index: number): string {
 }
 
 /** Русская плюрализация слова «проход» (1 проход / 2 прохода / 5 проходов). */
-function pluralPasses(n: number): string {
-  const mod10 = n % 10;
-  const mod100 = n % 100;
-  if (mod10 === 1 && mod100 !== 11) return "проход";
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return "прохода";
-  return "проходов";
-}
 
 type SourceBadgeInfo = { label: string; icon: LucideIcon; className: string };
 
@@ -221,31 +215,6 @@ function SourceBadge({
 }
 
 /** Группы приоритета плана дообследования (в порядке важности). */
-const WORKUP_GROUPS: Array<{
-  key: WorkupItem["priority"];
-  label: string;
-  short: string;
-  badgeCls: string;
-}> = [
-  {
-    key: "urgent",
-    label: "Срочные — выполнить немедленно",
-    short: "Срочно",
-    badgeCls: "border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300",
-  },
-  {
-    key: "high",
-    label: "Высокий приоритет",
-    short: "Высокий",
-    badgeCls: "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300",
-  },
-  {
-    key: "routine",
-    label: "Плановые",
-    short: "Плановый",
-    badgeCls: "border-gray-500/40 bg-gray-500/10 text-gray-600 dark:text-gray-300",
-  },
-];
 
 /** Цвет полосы вероятности: ≥70% зелёный, 40–70% янтарный, <40% серый. */
 function probabilityBarCls(pct: number): string {
@@ -262,10 +231,31 @@ interface Props {
   hasDocuments: boolean;
 }
 
+type PanelTab =
+  | "overview"
+  | "diagnoses"
+  | "workup"
+  | "therapy"
+  | "monitoring"
+  | "evidence"
+  | "raw"
+  | "audit";
+
+const TAB_LABELS: Array<{ key: PanelTab; label: string; icon: LucideIcon }> = [
+  { key: "overview", label: "Обзор", icon: LayoutDashboard },
+  { key: "diagnoses", label: "Гипотезы", icon: ListTree },
+  { key: "workup", label: "Обследование", icon: ListChecks },
+  { key: "therapy", label: "Терапия", icon: Pill },
+  { key: "monitoring", label: "Контроль", icon: HeartPulse },
+  { key: "evidence", label: "Источники", icon: BookOpen },
+  { key: "raw", label: "Текст ИИ", icon: AlignLeft },
+  { key: "audit", label: "Проверка", icon: ScanSearch },
+];
+
 export function AnalysisPanel({ analysis, caseId, onRunAnalysis, isAnalyzing, hasDocuments }: Props) {
   const [activeCitation, setActiveCitation] = React.useState<string | null>(null);
   const [versionHistoryOpen, setVersionHistoryOpen] = React.useState(false);
-  const [correctionsOpen, setCorrectionsOpen] = React.useState(false);
+  const [tab, setTab] = React.useState<PanelTab>("overview");
 
   const confidence = analysis.confidence ?? {};
   const sections = analysis.sections ?? [];
@@ -329,6 +319,7 @@ export function AnalysisPanel({ analysis, caseId, onRunAnalysis, isAnalyzing, ha
       // The parent's analysis query will refetch and authoritative data
       // will arrive. Optimistic UI may be cleared on the next render.
       qc.invalidateQueries({ queryKey: ["analysis", caseId] });
+      qc.invalidateQueries({ queryKey: ["case", caseId] });
     },
     onError: (err: unknown) => {
       const msg = err instanceof Error ? err.message : "Не удалось сохранить";
@@ -372,740 +363,1078 @@ export function AnalysisPanel({ analysis, caseId, onRunAnalysis, isAnalyzing, ha
   const currentVersion = analysis.version ?? 1;
   const canCompareVersions = currentVersion >= 2;
 
-  // ---------------------------------------------------------------------
-  // План дообследования: интерактивный чек-лист с сохранением в localStorage
-  // по ключу workup-done-{caseId}-{version} (сбрасывается на новой версии).
-  // ---------------------------------------------------------------------
-  const workupStorageKey = `workup-done-${caseId}-${currentVersion}`;
-  const [workupDone, setWorkupDone] = React.useState<Record<string, boolean>>({});
-  React.useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(workupStorageKey);
-      setWorkupDone(raw ? (JSON.parse(raw) as Record<string, boolean>) : {});
-    } catch {
-      setWorkupDone({});
-    }
-  }, [workupStorageKey]);
-
-  const toggleWorkupItem = (key: string) => {
-    setWorkupDone((prev) => {
-      const next = { ...prev, [key]: !prev[key] };
-      try {
-        window.localStorage.setItem(workupStorageKey, JSON.stringify(next));
-      } catch {
-        // localStorage может быть недоступен (приватный режим) — чек-лист
-        // продолжает работать в рамках сессии.
-      }
-      return next;
-    });
-  };
-
-  const workupItemsWithKeys = React.useMemo(
-    () => workupPlan.map((item, idx) => ({ item, key: `${idx}:${item.name}` })),
-    [workupPlan],
+  // v5.2: детерминированная проверка набора рекомендаций. Считается на клиенте
+  // из уже сохранённой структуры — врач видит её сразу после анализа, а не
+  // только в момент генерации.
+  const audit = React.useMemo(
+    () => auditAnalysis({ structured, citationsCount: citations.length }),
+    [structured, citations.length],
   );
-  const workupDoneCount = workupItemsWithKeys.filter(({ key }) => workupDone[key]).length;
+  const planProgress = React.useMemo(
+    () => workupProgress(workupPlan, structured?.workupTracker),
+    [workupPlan, structured?.workupTracker],
+  );
+
+  const topDx = differential[0];
+  const topPct = topDx ? Math.round(clamp01(topDx.probability) * 100) : 0;
+  const urgentItems = workupPlan.filter((w) => (w.priority ?? "routine") === "urgent");
+  const unlockedTherapy = therapyOptions.filter(
+    (t) => t.targetDx && effectiveConfirmed.some((d) => d.toLowerCase() === t.targetDx!.toLowerCase()),
+  ).length;
+  const hasStructured =
+    differential.length > 0 ||
+    workupPlan.length > 0 ||
+    therapyOptions.length > 0 ||
+    monitoringPlan.length > 0;
+  const safety = structured?.patientSafety;
+
+  const jumpTo = (next: PanelTab) => setTab(next);
+
+  const copyConclusion = React.useCallback(async () => {
+    const text = [analysis.conclusion, ...sections.map((s) => `### ${s.title}\n${s.content}`)]
+      .filter(Boolean)
+      .join("\n\n");
+    if (!text.trim()) {
+      toast.error("Заключение пусто");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("Заключение скопировано");
+    } catch {
+      toast.error("Браузер запретил доступ к буферу обмена");
+    }
+  }, [analysis.conclusion, sections]);
+
+  const kpiClass =
+    "flex min-w-0 flex-col gap-0.5 bg-card px-3 py-2 text-left transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {/* ================================================================
-          1. ШАПКА: версия, самопроверка ИИ, история версий
+          ШАПКА: версия, самопроверка, действия + KPI-полоса
           ================================================================ */}
-      <div className="space-y-1">
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-card/50 px-3 py-2">
-          <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-            <Cpu className="h-4 w-4 text-emerald-600" aria-hidden />
-            <span className="font-medium text-foreground">Анализ</span>
-            <Badge
-              variant="outline"
-              className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
-            >
-              v{currentVersion}
-            </Badge>
-            {verification?.performed && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Badge
-                    variant="outline"
-                    className="cursor-help gap-1 border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                    aria-label="Отчёт самопроверки ИИ"
-                  >
-                    <ShieldCheck className="h-3 w-3" aria-hidden />
-                    Самопроверка: {verification.passes ?? 1} {pluralPasses(verification.passes ?? 1)}
-                  </Badge>
-                </TooltipTrigger>
-                <TooltipContent className="max-w-sm">
-                  <div className="space-y-1.5">
-                    <p className="text-xs font-semibold">Самопроверка ИИ (verification pass)</p>
-                    {corrections.length > 0 ? (
-                      <ul className="list-disc space-y-0.5 pl-4 text-xs">
-                        {corrections.map((c, i) => (
-                          <li key={i}>{c}</li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="text-xs">Существенных расхождений не найдено.</p>
-                    )}
-                    {verification.factsGrounded === true && (
-                      <p className="text-xs text-emerald-600 dark:text-emerald-400">
-                        Все факты подтверждены исходными данными.
-                      </p>
-                    )}
-                  </div>
-                </TooltipContent>
-              </Tooltip>
-            )}
-          </div>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span tabIndex={0} aria-label="История версий анализа">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="gap-1.5"
-                  disabled={!canCompareVersions}
-                  onClick={() => setVersionHistoryOpen(true)}
-                  aria-label="Открыть историю версий анализа"
-                >
-                  <History className="h-4 w-4" aria-hidden />
-                  История версий
-                  {canCompareVersions && (
-                    <Badge
-                      variant="secondary"
-                      className="ml-1 bg-emerald-500/15 text-xs text-emerald-700 dark:text-emerald-400"
-                    >
-                      {currentVersion}
-                    </Badge>
-                  )}
-                </Button>
-              </span>
-            </TooltipTrigger>
-            <TooltipContent>
-              {canCompareVersions
-                ? `Доступно версий: ${currentVersion}. Нажмите, чтобы сравнить.`
-                : "Запустите анализ повторно, чтобы создать новую версию для сравнения."}
-            </TooltipContent>
-          </Tooltip>
-        </div>
-
-        {/* Раскрывающийся список исправлений самопроверки */}
-        {verification?.performed && corrections.length > 0 && (
-          <Collapsible open={correctionsOpen} onOpenChange={setCorrectionsOpen}>
-            <div className="flex justify-end px-1">
-              <CollapsibleTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 gap-1 px-2 text-xs text-muted-foreground"
-                  aria-label={correctionsOpen ? "Скрыть исправления самопроверки" : "Показать исправления самопроверки"}
-                >
-                  <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" aria-hidden />
-                  Исправления ИИ ({corrections.length})
-                  <ChevronDown
-                    className={cn("h-3.5 w-3.5 transition-transform", correctionsOpen && "rotate-180")}
-                    aria-hidden
-                  />
-                </Button>
-              </CollapsibleTrigger>
-            </div>
-            <CollapsibleContent>
-              <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3">
-                <ul className="list-disc space-y-1 pl-4 text-xs text-foreground">
-                  {corrections.map((c, i) => (
-                    <li key={i}>{c}</li>
-                  ))}
-                </ul>
-                {verification.factsGrounded === true && (
-                  <p className="mt-2 flex items-center gap-1 text-xs text-emerald-700 dark:text-emerald-400">
-                    <ShieldCheck className="h-3.5 w-3.5" aria-hidden />
-                    Все утверждения подтверждены исходными данными пациента.
-                  </p>
+      <div className="overflow-hidden rounded-xl border bg-card shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-2 border-b bg-medical-gradient-soft px-3 py-2.5">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary">
+              <Cpu className="h-4 w-4" aria-hidden />
+            </span>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-sm font-semibold">Результат ИИ-анализа</span>
+                <Badge variant="outline" className="bg-background/70 text-[10px]">
+                  v{currentVersion}
+                </Badge>
+                {verification?.performed && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Badge
+                        variant="outline"
+                        className="cursor-help gap-1 border-emerald-500/40 bg-emerald-500/10 text-[10px] text-emerald-700 dark:text-emerald-400"
+                      >
+                        <ShieldCheck className="h-3 w-3" aria-hidden />
+                        самопроверка: {verification.passes ?? 1}
+                      </Badge>
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-sm">
+                      <p className="text-xs font-semibold">Самопроверка ИИ (verification pass)</p>
+                      {corrections.length > 0 ? (
+                        <ul className="mt-1 list-disc space-y-0.5 pl-4 text-xs">
+                          {corrections.map((c, i) => (
+                            <li key={i}>{c}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="mt-1 text-xs">Существенных расхождений не найдено.</p>
+                      )}
+                    </TooltipContent>
+                  </Tooltip>
                 )}
               </div>
-            </CollapsibleContent>
-          </Collapsible>
-        )}
-      </div>
-
-      {/* ================================================================
-          2. РЕЗЮМЕ / ЗАКЛЮЧЕНИЕ
-          ================================================================ */}
-      <Card className="overflow-hidden rounded-lg border-l-4 border-l-primary">
-        <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
-            <CardTitle className="flex items-center gap-2 text-base">
-              <FileText className="h-4 w-4 text-primary" />
-              Заключение
-            </CardTitle>
-            <Badge className="bg-medical-gradient text-white">ИИ-анализ</Badge>
+              <p className="text-[11px] text-muted-foreground">
+                Гипотезы с обоснованием → план обследования с подсказками → терапия
+                после подтверждения диагноза
+              </p>
+            </div>
           </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {/* Diagnosis highlight — extract ICD-10 code and diagnosis from conclusion */}
-          {(() => {
-            const diagnosisMatch = analysis.conclusion.match(/(Основной диагноз|Диагноз)[:\s]*([^\n]+)/i);
-            const icdMatch = analysis.conclusion.match(/\b([A-Z]\d{2}(?:\.\d{1,4})?)\b/g);
-            const icdCodes = icdMatch ? Array.from(new Set(icdMatch)).slice(0, 4) : [];
-            if (diagnosisMatch || icdCodes.length > 0) {
-              return (
-                <div className="rounded-lg border border-primary/20 bg-medical-gradient-soft p-3">
-                  <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-primary">
-                    <Stethoscope className="h-3.5 w-3.5" />
-                    Установленный диагноз
-                  </div>
-                  {diagnosisMatch && (
-                    <div className="text-sm font-medium leading-snug text-foreground">
-                      {stripMarkdown(diagnosisMatch[2].trim().replace(/\(.*?\)/g, "").trim())}
-                    </div>
-                  )}
-                  {icdCodes.length > 0 && (
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {icdCodes.map((code, i) => (
-                        <Badge key={i} variant="outline" className="border-teal-500/40 bg-teal-500/10 font-mono text-[10px] text-teal-700 dark:text-teal-300">
-                          {code}
-                        </Badge>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            }
-            return null;
-          })()}
-          <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">{stripMarkdown(analysis.conclusion)}</p>
-        </CardContent>
-      </Card>
-
-      {/* ================================================================
-          3. ДИФФЕРЕНЦИАЛЬНЫЙ ДИАГНОЗ — карточки-гипотезы (v5.0)
-          ================================================================ */}
-      {differential.length > 0 && (
-        <Card className="rounded-lg border">
-          <CardHeader className="pb-3">
-            <CardTitle className="flex flex-wrap items-center gap-2 text-base">
-              <ListTree className="h-4 w-4 text-primary" />
-              Дифференциальный диагноз
-              <Badge variant="secondary" className="ml-auto">{differential.length}</Badge>
-            </CardTitle>
-            <p className="text-xs text-muted-foreground">
-              Гипотезы упорядочены по вероятности. Разверните карточку, чтобы увидеть аргументы «за»/«против» и план подтверждения.
-            </p>
-          </CardHeader>
-          <CardContent>
-            <Accordion
-              type="multiple"
-              defaultValue={[dxKey(differential[0], 0)]}
-              className="space-y-2"
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span tabIndex={0}>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 gap-1.5 bg-background/60"
+                    disabled={!canCompareVersions}
+                    onClick={() => setVersionHistoryOpen(true)}
+                    aria-label="Открыть историю версий анализа"
+                  >
+                    <History className="h-3.5 w-3.5" aria-hidden />
+                    История
+                    {canCompareVersions && (
+                      <Badge variant="secondary" className="ml-0.5 h-4 px-1 text-[10px]">
+                        {currentVersion}
+                      </Badge>
+                    )}
+                  </Button>
+                </span>
+              </TooltipTrigger>
+              <TooltipContent>
+                {canCompareVersions
+                  ? `Доступно версий: ${currentVersion}. Нажмите, чтобы сравнить.`
+                  : "Запустите анализ повторно, чтобы появилась новая версия для сравнения."}
+              </TooltipContent>
+            </Tooltip>
+            <Button
+              size="sm"
+              className="h-8 gap-1.5"
+              onClick={() => onRunAnalysis(false)}
+              disabled={isAnalyzing || !hasDocuments}
             >
-              {differential.map((dx, idx) => {
-                const confirmed = isDxConfirmed(dx.diagnosis);
+              {isAnalyzing ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                  Анализ…
+                </>
+              ) : (
+                <>
+                  <Cpu className="h-3.5 w-3.5" aria-hidden />
+                  Повторить анализ
+                </>
+              )}
+            </Button>
+          </div>
+        </div>
+
+        {/* KPI-полоса: 4 кликабельные сводки */}
+        <div className="grid grid-cols-2 gap-px bg-border sm:grid-cols-4">
+          <button type="button" className={kpiClass} onClick={() => jumpTo("diagnoses")}>
+            <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+              Рабочий диагноз
+            </span>
+            <span className="line-clamp-2 text-xs font-semibold leading-snug">
+              {topDx ? topDx.diagnosis : "не сформирован"}
+            </span>
+            <span className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+              {hypothesesLabel(differential.length)}
+              {topDx && <span className="font-bold tabular-nums text-foreground">{topPct}%</span>}
+            </span>
+          </button>
+          <button type="button" className={kpiClass} onClick={() => jumpTo("workup")}>
+            <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+              План обследования
+            </span>
+            <span className="text-xs font-semibold tabular-nums">
+              {planProgress.done} / {workupPlan.length} выполнено
+            </span>
+            <span className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+              {urgentItems.length > 0 ? (
+                <span className="font-semibold text-red-600 dark:text-red-400">
+                  срочных: {urgentItems.length}
+                </span>
+              ) : (
+                <span>срочных нет</span>
+              )}
+              <span>· {planProgress.withResult} с результатом</span>
+            </span>
+          </button>
+          <button type="button" className={kpiClass} onClick={() => jumpTo("therapy")}>
+            <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+              Терапия
+            </span>
+            <span className="text-xs font-semibold tabular-nums">
+              {therapyOptionsLabel(therapyOptions.length)}
+            </span>
+            <span className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+              разблокировано: {unlockedTherapy} из {therapyOptions.length}
+            </span>
+          </button>
+          <button type="button" className={kpiClass} onClick={() => jumpTo("audit")}>
+            <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+              Проверка набора
+            </span>
+            <span
+              className={cn(
+                "text-xs font-semibold tabular-nums",
+                audit.score >= 85
+                  ? "text-emerald-700 dark:text-emerald-400"
+                  : audit.score >= 65
+                    ? "text-amber-700 dark:text-amber-400"
+                    : "text-red-700 dark:text-red-400",
+              )}
+            >
+              {audit.score} / 100
+            </span>
+            <span className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+              {audit.critical > 0 ? (
+                <span className="font-semibold text-red-600 dark:text-red-400">
+                  критично: {audit.critical}
+                </span>
+              ) : (
+                <span>критичных нет</span>
+              )}
+              <span>· {audit.warning} на внимание</span>
+            </span>
+          </button>
+        </div>
+
+        {/* Вкладки */}
+        <Tabs value={tab} onValueChange={(v) => setTab(v as PanelTab)} className="gap-0">
+          <div className="overflow-x-auto border-b bg-muted/30 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            <TabsList className="h-9 w-max min-w-full justify-start gap-0.5 rounded-none bg-transparent p-1">
+              {TAB_LABELS.map(({ key, label, icon: Icon }) => {
+                const count =
+                  key === "diagnoses"
+                    ? differential.length
+                    : key === "workup"
+                      ? workupPlan.length
+                      : key === "therapy"
+                        ? therapyOptions.length
+                        : key === "monitoring"
+                          ? monitoringPlan.length
+                          : key === "evidence"
+                            ? citations.length + recommendations.length
+                            : key === "audit"
+                              ? audit.findings.length
+                              : 0;
                 return (
-                  <DifferentialItem
-                    key={dxKey(dx, idx)}
-                    dx={dx}
-                    value={dxKey(dx, idx)}
-                    confirmed={confirmed}
-                    onConfirmToggle={(action, evidence) =>
-                      handleConfirmDx(dx.diagnosis, action, evidence)
-                    }
-                    isConfirming={
-                      confirmDxMutation.isPending &&
-                      confirmDxMutation.variables?.diagnosis === dx.diagnosis
-                    }
-                  />
+                  <TabsTrigger
+                    key={key}
+                    value={key}
+                    className="h-7 flex-none gap-1 px-2.5 text-[11px] data-[state=active]:bg-background data-[state=active]:shadow-sm"
+                  >
+                    <Icon className="h-3.5 w-3.5" aria-hidden />
+                    {label}
+                    {count > 0 && (
+                      <span
+                        className={cn(
+                          "rounded px-1 text-[10px] tabular-nums",
+                          key === "audit" && audit.critical > 0
+                            ? "bg-red-500/15 text-red-700 dark:text-red-300"
+                            : "bg-muted text-muted-foreground",
+                        )}
+                      >
+                        {count}
+                      </span>
+                    )}
+                  </TabsTrigger>
                 );
               })}
-            </Accordion>
-          </CardContent>
-        </Card>
-      )}
+            </TabsList>
+          </div>
 
-      {/* ================================================================
-          4. ПЛАН ДООБСЛЕДОВАНИЯ — интерактивный чек-лист (v5.0)
-          ================================================================ */}
-      {workupPlan.length > 0 && (
-        <Card className="rounded-lg border">
-          <CardHeader className="pb-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <ListChecks className="h-4 w-4 text-primary" />
-                План дообследования
-              </CardTitle>
-              <Badge variant="secondary" className="ml-auto">
-                Выполнено {workupDoneCount} из {workupPlan.length}
-              </Badge>
-            </div>
-            <Progress
-              value={workupPlan.length ? (workupDoneCount / workupPlan.length) * 100 : 0}
-              className="mt-2 h-1.5 [&>div]:bg-emerald-500"
-              aria-label={`Прогресс выполнения плана дообследования: ${workupDoneCount} из ${workupPlan.length}`}
-            />
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {WORKUP_GROUPS.map((group) => {
-              const groupItems = workupItemsWithKeys.filter(
-                ({ item }) => (item.priority ?? "routine") === group.key,
-              );
-              if (groupItems.length === 0) return null;
-              return (
-                <div key={group.key}>
-                  <div className="mb-1.5 flex items-center gap-2">
-                    <Badge variant="outline" className={cn("text-[10px]", group.badgeCls)}>
-                      {group.label}
-                    </Badge>
-                    <span className="text-xs text-muted-foreground">{groupItems.length}</span>
-                  </div>
-                  <div className="space-y-1.5">
-                    {groupItems.map(({ item, key }) => {
-                      const done = !!workupDone[key];
-                      const hasInterpretationFields = !!(
-                        item.interpretation ||
-                        item.expectedResult ||
-                        item.normalRange ||
-                        item.cutoffs ||
-                        item.confirmsIf ||
-                        item.refutesIf ||
-                        (item.targetDxConfirm && item.targetDxConfirm.length > 0) ||
-                        (item.targetDxRefute && item.targetDxRefute.length > 0)
-                      );
-                      return (
-                        <WorkupCard
-                          key={key}
-                          caseId={caseId}
-                          itemKey={key}
-                          item={item}
-                          done={done}
-                          groupShort={group.short}
-                          groupBadgeCls={group.badgeCls}
-                          onToggle={toggleWorkupItem}
-                          hasInterpretationFields={hasInterpretationFields}
-                        />
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })}
-          </CardContent>
-        </Card>
-      )}
+          {/* ============================================================
+              ОБЗОР — что решает врач сейчас
+              ============================================================ */}
+          <TabsContent value="overview" className="space-y-3 p-3">
+            {!hasStructured && (
+              <Alert className="border-amber-500/40 bg-amber-500/5 [&>svg]:text-amber-600">
+                <AlertTriangle className="h-4 w-4" />
+                <AlertTitle className="text-xs font-semibold">
+                  Структурированный разбор отсутствует
+                </AlertTitle>
+                <AlertDescription className="text-xs">
+                  Для этого анализа нет блока гипотез/обследования/терапии (старая
+                  версия или структуризатор не справился). Текст заключения
+                  доступен во вкладке «Текст ИИ», источники — в «Источниках».
+                  Повторите анализ, чтобы получить структурированное заключение.
+                </AlertDescription>
+              </Alert>
+            )}
 
-      {/* ================================================================
-          5. ТЕРАПИЯ — только после подтверждения диагноза (v5.0)
-          ================================================================ */}
-      {therapyOptions.length > 0 && (
-        <Card className="rounded-lg border">
-          <CardHeader className="pb-3">
-            <CardTitle className="flex flex-wrap items-center gap-2 text-base">
-              <Pill className="h-4 w-4 text-emerald-600" />
-              Терапия
-              <Badge variant="secondary" className="ml-auto">{therapyOptions.length}</Badge>
-              {/* v5.1: shows how many diagnoses are confirmed vs total. */}
-              {effectiveConfirmed.length > 0 && (
-                <Badge
-                  variant="outline"
-                  className="gap-1 border-teal-500/40 bg-teal-500/10 text-[10px] text-teal-700 dark:text-teal-300"
-                >
-                  <ShieldCheck className="h-3 w-3" aria-hidden />
-                  Подтверждено {effectiveConfirmed.length}
-                </Badge>
-              )}
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <Alert className="border-amber-500/40 bg-amber-500/5 [&>svg]:text-amber-600">
-              <AlertTriangle className="h-4 w-4" />
-              <AlertTitle className="text-xs font-semibold text-amber-800 dark:text-amber-300">
-                Терапия — только после подтверждения диагноза
-              </AlertTitle>
-              <AlertDescription className="text-xs text-amber-800/90 dark:text-amber-200/90">
-                Варианты терапии приведены для каждой диагностической гипотезы и подлежат
-                применению только ПОСЛЕ её подтверждения результатами дообследования.
-                {effectiveConfirmed.length === 0
-                  ? " Карточки терапии заблокированы — подтвердите хотя бы один диагноз кнопкой «Подтвердить диагноз» в карточке гипотезы."
-                  : ` Разблокированы для диагнозов: ${effectiveConfirmed.join(", ")}.`}
-              </AlertDescription>
-            </Alert>
-            <div className="grid max-h-[600px] gap-3 overflow-y-auto pr-1 lg:grid-cols-2">
-              {therapyOptions.map((t, i) => {
-                // v5.1: hard workflow gate — therapy option is locked
-                // unless its targetDx is in the confirmed list. Options
-                // without a targetDx are always locked (must be tied to
-                // a hypothesis by the parser; if not — show as locked).
-                const targetDx = t.targetDx?.trim();
-                const isUnlocked = targetDx
-                  ? effectiveConfirmed.some(
-                      (d) => d.toLowerCase() === targetDx.toLowerCase(),
-                    )
-                  : false;
-                return <TherapyCard key={i} option={t} unlocked={isUnlocked} />;
-              })}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* ================================================================
-          6. МАРКЕРЫ И МОНИТОРИНГ (v5.0)
-          ================================================================ */}
-      {monitoringPlan.length > 0 && (
-        <Card className="rounded-lg border">
-          <CardHeader className="pb-3">
-            <CardTitle className="flex flex-wrap items-center gap-2 text-base">
-              <HeartPulse className="h-4 w-4 text-teal-600" />
-              Маркеры и мониторинг
-              <Badge variant="secondary" className="ml-auto">{monitoringPlan.length}</Badge>
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="max-h-96 space-y-2 overflow-y-auto pr-1">
-              {monitoringPlan.map((m, i) => (
-                <div key={i} className="rounded-lg border p-3">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-semibold">{m.marker}</span>
-                    {m.frequency && (
-                      <Badge variant="outline" className="text-[10px]">{m.frequency}</Badge>
-                    )}
-                  </div>
-                  {(m.target || m.purpose) && (
-                    <div className="mt-1 grid gap-x-4 gap-y-0.5 text-xs text-muted-foreground sm:grid-cols-2">
-                      {m.target && (
-                        <p>
-                          <span className="font-medium text-foreground">Цель:</span> {m.target}
-                        </p>
-                      )}
-                      {m.purpose && (
-                        <p>
-                          <span className="font-medium text-foreground">Зачем:</span> {m.purpose}
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* ================================================================
-          7. УВЕРЕННОСТЬ МОДЕЛИ
-          ================================================================ */}
-      {Object.keys(confidence).length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <TrendingUp className="h-4 w-4 text-primary" />
-              Степень уверенности модели
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {Object.entries(confidence).map(([key, val]) => (
-              <div key={key}>
-                <div className="mb-1 flex items-center justify-between text-sm">
-                  <span className="capitalize text-muted-foreground">{translateConfidenceKey(key)}</span>
-                  <span className="font-medium">{Math.round((val as number) * 100)}%</span>
-                </div>
-                <Progress
-                  value={(val as number) * 100}
-                  className={cn(
-                    "h-2",
-                    (val as number) >= 0.7 && "[&>div]:bg-emerald-500",
-                    (val as number) >= 0.4 && (val as number) < 0.7 && "[&>div]:bg-amber-500",
-                    (val as number) < 0.4 && "[&>div]:bg-red-500",
-                  )}
-                />
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* ================================================================
-          8. ПОДРОБНЫЕ РАЗДЕЛЫ (текстовый fallback — работает и для старых
-             анализов без structured, и когда текстовые разделы дополняют
-             структурированные блоки)
-          ================================================================ */}
-      {sections.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <AlignLeft className="h-4 w-4 text-primary" />
-              Подробные разделы анализа
-              <Badge variant="secondary" className="ml-auto">{sections.length}</Badge>
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="max-h-[600px] space-y-4 overflow-y-auto pr-1 -mr-1">
-              {sections.map((section, idx) => (
-                <div key={idx} className="rounded-lg border p-3">
-                  <div className="mb-2 flex items-center justify-between">
-                    <h4 className="text-sm font-semibold">{section.title}</h4>
-                    <Badge variant="outline" className="text-xs">{Math.round(section.confidence * 100)}% уверенность</Badge>
-                  </div>
-                  <div className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">{stripMarkdown(section.content)}</div>
-                  {section.citations && section.citations.length > 0 && (
-                    <div className="mt-2 flex flex-wrap gap-1">
-                      {section.citations.map((citOrId: string | Citation, ci: number) => {
-                        const cit = typeof citOrId === "string"
-                          ? citations.find((c) => c.claim === citOrId)
-                          : citOrId;
-                        if (!cit) return null;
-                        return (
-                          <button
-                            key={ci}
-                            onClick={() => handleCitationClick(cit)}
-                            className={cn(
-                              "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition-colors hover:bg-accent",
-                              activeCitation === cit.claim && "border-primary bg-primary/10",
-                            )}
-                            aria-label={`Показать цитату: ${cit.claim.slice(0, 60)}`}
+            <div className="grid gap-3 lg:grid-cols-3">
+              <div className="space-y-3 lg:col-span-2">
+                {/* Рабочий диагноз */}
+                {topDx ? (
+                  <Card className="gap-3 overflow-hidden rounded-lg border-l-4 border-l-primary py-3">
+                    <CardHeader className="px-3 pb-1.5">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <CardTitle className="flex items-center gap-2 text-sm">
+                          <Stethoscope className="h-4 w-4 text-primary" aria-hidden />
+                          Рабочий диагноз
+                        </CardTitle>
+                        {topDx.icd10 && (
+                          <Badge
+                            variant="outline"
+                            className="font-mono text-[10px] text-teal-700 dark:text-teal-300"
                           >
-                            <Quote className="h-3 w-3" />
-                            {cit.claim.slice(0, 40)}
-                            {cit.claim.length > 40 && "…"}
-                          </button>
+                            {topDx.icd10}
+                          </Badge>
+                        )}
+                        {isDxConfirmed(topDx.diagnosis) ? (
+                          <Badge className="gap-1 bg-teal-600 text-[10px] text-white">
+                            <ShieldCheck className="h-3 w-3" aria-hidden />
+                            подтверждён
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline" className="text-[10px]">
+                            не подтверждён
+                          </Badge>
+                        )}
+                        <span className="ml-auto text-lg font-bold tabular-nums">{topPct}%</span>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="space-y-2.5 px-3">
+                      <div>
+                        <div className="text-sm font-semibold leading-snug">{topDx.diagnosis}</div>
+                        <Progress
+                          value={topPct}
+                          className={cn("mt-1.5 h-1.5", probabilityBarCls(topPct))}
+                          aria-label={`Вероятность рабочего диагноза: ${topPct}%`}
+                        />
+                      </div>
+
+                      {(topDx.argumentsFor ?? []).length > 0 && (
+                        <div>
+                          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-400">
+                            Аргументы за
+                          </div>
+                          <ul className="space-y-0.5 text-xs leading-snug">
+                            {(topDx.argumentsFor ?? []).slice(0, 3).map((a, i) => (
+                              <li key={i} className="flex gap-1.5">
+                                <Check className="mt-0.5 h-3 w-3 shrink-0 text-emerald-600" aria-hidden />
+                                <span>{stripMarkdown(a)}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {(topDx.argumentsAgainst ?? []).length > 0 && (
+                        <div>
+                          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-400">
+                            Что не укладывается
+                          </div>
+                          <ul className="space-y-0.5 text-xs leading-snug">
+                            {(topDx.argumentsAgainst ?? []).slice(0, 2).map((a, i) => (
+                              <li key={i} className="flex gap-1.5">
+                                <X className="mt-0.5 h-3 w-3 shrink-0 text-amber-600" aria-hidden />
+                                <span>{stripMarkdown(a)}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {(topDx.redFlags ?? []).length > 0 && (
+                        <RedFlagsAlert flags={topDx.redFlags ?? []} />
+                      )}
+
+                      <div className="flex flex-wrap items-center gap-1.5 border-t pt-2">
+                        {!isDxConfirmed(topDx.diagnosis) && (
+                          <Button
+                            size="sm"
+                            className="h-7 gap-1 px-2.5 text-[11px]"
+                            disabled={confirmDxMutation.isPending}
+                            onClick={() => jumpTo("diagnoses")}
+                          >
+                            <ShieldCheck className="h-3 w-3" aria-hidden />
+                            Подтвердить после обследования
+                          </Button>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 gap-1 px-2 text-[11px] text-primary"
+                          onClick={() => jumpTo("diagnoses")}
+                        >
+                          Все {differential.length} гипотез
+                          <ChevronRight className="h-3 w-3" aria-hidden />
+                        </Button>
+                        {topDx.clinrecCode && (
+                          <Badge
+                            variant="outline"
+                            className="gap-1 border-teal-500/40 bg-teal-500/10 text-[10px] text-teal-700 dark:text-teal-300"
+                          >
+                            <Landmark className="h-3 w-3" aria-hidden />
+                            КР Минздрава {topDx.clinrecCode}
+                          </Badge>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
+                ) : (
+                  <Card className="gap-3 py-3">
+                    <CardContent className="flex flex-col items-center gap-2 px-3 py-8 text-center">
+                      <ListTree className="h-8 w-8 text-muted-foreground/50" aria-hidden />
+                      <p className="text-sm font-medium">Гипотезы не сформированы</p>
+                      <p className="max-w-md text-xs text-muted-foreground">
+                        Без дифференциального ряда план обследования и терапия не
+                        строятся. Проверьте документы случая и повторите анализ.
+                      </p>
+                    </CardContent>
+                  </Card>
+                )}
+
+                {/* Срочные исследования */}
+                {urgentItems.length > 0 && (
+                  <Card className="gap-3 rounded-lg border-l-4 border-l-red-500 py-3">
+                    <CardHeader className="px-3 pb-1.5">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <CardTitle className="flex items-center gap-2 text-sm">
+                          <AlertTriangle className="h-4 w-4 text-red-600" aria-hidden />
+                          Срочно — выполнить первыми
+                        </CardTitle>
+                        <Badge variant="outline" className="text-[10px]">
+                          {urgentItems.length}
+                        </Badge>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="ml-auto h-6 px-1.5 text-[10px] text-primary"
+                          onClick={() => jumpTo("workup")}
+                        >
+                          Отметить выполнение
+                          <ChevronRight className="h-3 w-3" aria-hidden />
+                        </Button>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="space-y-1.5 px-3">
+                      {urgentItems.slice(0, 4).map((item, i) => {
+                        const entry = structured?.workupTracker?.[workupKey(item, i)];
+                        const meta = workupStatusMeta(entry?.status);
+                        return (
+                          <div
+                            key={`${item.name}-${i}`}
+                            className="flex flex-wrap items-center gap-1.5 rounded-md border p-2"
+                          >
+                            <span className={cn("h-1.5 w-1.5 rounded-full", meta.dotCls)} aria-hidden />
+                            <span className="text-xs font-medium">{item.name}</span>
+                            {item.timing && (
+                              <Badge variant="outline" className="text-[10px]">
+                                {item.timing}
+                              </Badge>
+                            )}
+                            <Badge variant="outline" className={cn("ml-auto text-[10px]", meta.badgeCls)}>
+                              {meta.short}
+                            </Badge>
+                          </div>
                         );
                       })}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* ================================================================
-          9. ЛЕКАРСТВЕННЫЕ ВЗАИМОДЕЙСТВИЯ (DDI) — с логикой Override
-          ================================================================ */}
-      <DDIAlertsCard caseId={caseId} alerts={analysis.ddiAlerts ?? []} />
-
-      {/* ================================================================
-          10. МКБ-10 КОДЫ
-          ================================================================ */}
-      {icd10Suggestions.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Code className="h-4 w-4 text-primary" />
-              МКБ-10 коды
-              <Badge variant="secondary" className="ml-auto">{icd10Suggestions.length}</Badge>
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="flex flex-wrap gap-2">
-              {icd10Suggestions.map((code, i) => (
-                <div key={i} className="rounded-lg border p-2.5">
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-sm font-semibold text-primary">{code.code}</span>
-                    <Badge variant="outline" className="text-xs">{Math.round(code.confidence * 100)}%</Badge>
-                  </div>
-                  <p className="mt-1 text-xs text-muted-foreground">{code.description}</p>
-                  <Badge variant="secondary" className="mt-1 text-[10px]">{code.source === "ai" ? "ИИ" : "Вручную"}</Badge>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* ================================================================
-          11. МУТАЦИИ + КЛИНИЧЕСКИЕ РЕКОМЕНДАЦИИ (RAG) — 2 колонки
-          ================================================================ */}
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Dna className="h-4 w-4 text-emerald-600" />
-              Генетические варианты
-              <Badge variant="secondary" className="ml-auto">{mutations.length}</Badge>
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {mutations.length > 0 ? (
-              <div className="max-h-80 overflow-y-auto pr-1 -mr-1">
-                <div className="space-y-2">
-                  {mutations.map((m, i) => (
-                    <div key={i} className="rounded-lg border p-2.5">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-sm font-semibold">{m.gene}</span>
-                        <span className="text-xs text-muted-foreground">{m.variant}</span>
-                        <Badge variant="outline" className={cn("ml-auto text-xs", sigColor(m.clinicalSignificance))}>
-                          {sigLabel(m.clinicalSignificance)}
-                        </Badge>
-                      </div>
-                      <p className="mt-1 text-xs text-muted-foreground">{m.interpretation}</p>
-                    </div>
-                  ))}
-                </div>
+                      {urgentItems.length > 4 && (
+                        <p className="text-[11px] text-muted-foreground">
+                          и ещё {urgentItems.length - 4} срочных исследования
+                        </p>
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
               </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">Варианты не выявлены</p>
-            )}
-          </CardContent>
-        </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <BookOpen className="h-4 w-4 text-primary" />
-              Клинические рекомендации (RAG)
-              <Badge variant="secondary" className="ml-auto">{recommendations.length}</Badge>
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {recommendations.length > 0 ? (
-              <div className="max-h-80 overflow-y-auto pr-1 -mr-1">
-                <div className="space-y-2">
-                  {recommendations.map((r, i) => (
-                    <div key={i} className="rounded-lg border p-2.5">
-                      <div className="flex items-start justify-between gap-2">
-                        <span className="text-sm font-medium">{r.title}</span>
-                        <Badge variant="outline" className="shrink-0 text-xs">{Math.round(r.relevanceScore * 100)}%</Badge>
-                      </div>
-                      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                        {r.gene && <span className="font-mono font-medium text-emerald-600">{r.gene}</span>}
-                        <span>{r.source}</span>
-                        {r.evidenceLevel && <Badge variant="secondary" className="text-xs">ур. {r.evidenceLevel}</Badge>}
-                      </div>
+              {/* Правая колонка: проверка, безопасность, уверенность */}
+              <div className="space-y-3">
+                <Card className="gap-3 rounded-lg py-3">
+                  <CardHeader className="px-3 pb-1.5">
+                    <div className="flex items-center gap-2">
+                      <CardTitle className="flex items-center gap-2 text-sm">
+                        <ScanSearch className="h-4 w-4 text-primary" aria-hidden />
+                        Проверка рекомендаций
+                      </CardTitle>
+                      <span
+                        className={cn(
+                          "ml-auto text-base font-bold tabular-nums",
+                          audit.score >= 85
+                            ? "text-emerald-700 dark:text-emerald-400"
+                            : audit.score >= 65
+                              ? "text-amber-700 dark:text-amber-400"
+                              : "text-red-700 dark:text-red-400",
+                        )}
+                      >
+                        {audit.score}
+                      </span>
                     </div>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">Релевантные рекомендации не найдены</p>
-            )}
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* ================================================================
-          12. КЛИНИЧЕСКИЕ ПУТИ
-          ================================================================ */}
-      {pathwayMatches.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Activity className="h-4 w-4 text-primary" />
-              Клинические пути
-              <Badge variant="secondary" className="ml-auto">{pathwayMatches.length}</Badge>
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="max-h-96 overflow-y-auto pr-1 -mr-1">
-              <div className="space-y-2">
-                {pathwayMatches.map((pathway, i) => (
-                  <div key={i} className="rounded-lg border p-3">
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium text-sm">{pathway.name}</span>
-                      <Badge variant="outline" className="text-xs">{Math.round(pathway.matchScore * 100)}% совпадение</Badge>
-                    </div>
-                    {pathway.icd10Code && (
-                      <p className="mt-1 text-xs text-muted-foreground">МКБ-10: {pathway.icd10Code}</p>
+                  </CardHeader>
+                  <CardContent className="space-y-1.5 px-3">
+                    {audit.findings.slice(0, 3).map((f) => (
+                      <div key={f.id} className="flex items-start gap-1.5 text-[11px] leading-snug">
+                        <span
+                          className={cn(
+                            "mt-1 h-1.5 w-1.5 shrink-0 rounded-full",
+                            f.severity === "critical"
+                              ? "bg-red-500"
+                              : f.severity === "warning"
+                                ? "bg-amber-500"
+                                : "bg-slate-400",
+                          )}
+                          aria-hidden
+                        />
+                        <span className={cn(f.severity === "info" && "text-muted-foreground")}>
+                          {f.title}
+                        </span>
+                      </div>
+                    ))}
+                    {audit.findings.length === 0 && (
+                      <p className="text-[11px] text-emerald-700 dark:text-emerald-400">
+                        Формальных замечаний нет.
+                      </p>
                     )}
-                    <p className="mt-1 text-xs text-muted-foreground">Категория: {pathway.category}</p>
-                    {pathway.steps && pathway.steps.length > 0 && (
-                      <div className="mt-2 space-y-1">
-                        {pathway.steps?.map((step, si) => (
-                          <div key={si} className="flex items-start gap-2 text-xs">
-                            <span className="mt-0.5 shrink-0 text-primary font-mono">{step.order}.</span>
-                            <div>
-                              <span className="font-medium">{step.title}</span>
-                              <span className="text-muted-foreground"> — {step.description}</span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="mt-1 h-7 w-full gap-1 text-[11px]"
+                      onClick={() => jumpTo("audit")}
+                    >
+                      Все замечания ({audit.findings.length})
+                      <ChevronRight className="h-3 w-3" aria-hidden />
+                    </Button>
+                  </CardContent>
+                </Card>
+
+                {(safety?.allergies?.length || safety?.renal || safety?.activeMedications?.length) && (
+                  <Card className="gap-3 rounded-lg py-3">
+                    <CardHeader className="px-3 pb-1.5">
+                      <CardTitle className="flex items-center gap-2 text-sm">
+                        <ShieldAlert className="h-4 w-4 text-amber-600" aria-hidden />
+                        Безопасность назначений
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-1.5 px-3 text-[11px] leading-snug">
+                      {safety?.allergies && safety.allergies.length > 0 ? (
+                        <div>
+                          <span className="font-semibold text-red-700 dark:text-red-400">
+                            Аллергии:{" "}
+                          </span>
+                          {safety.allergies.join(", ")}
+                        </div>
+                      ) : (
+                        <div className="text-muted-foreground">Аллергии в карте не указаны</div>
+                      )}
+                      {safety?.renal && (
+                        <div>
+                          <span className="font-semibold text-foreground">Функция почек: </span>
+                          {safety.renal}
+                        </div>
+                      )}
+                      {safety?.activeMedications && safety.activeMedications.length > 0 && (
+                        <div>
+                          <span className="font-semibold text-foreground">Постоянная терапия: </span>
+                          {safety.activeMedications.slice(0, 6).join(", ")}
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
+
+                {Object.keys(confidence).length > 0 && (
+                  <Card className="gap-3 rounded-lg py-3">
+                    <CardHeader className="px-3 pb-1.5">
+                      <CardTitle className="flex items-center gap-2 text-sm">
+                        <TrendingUp className="h-4 w-4 text-primary" aria-hidden />
+                        Уверенность модели
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-2 px-3">
+                      {Object.entries(confidence).map(([key, val]) => {
+                        const pct = Math.round((val as number) * 100);
+                        return (
+                          <div key={key}>
+                            <div className="mb-0.5 flex items-center justify-between text-[11px]">
+                              <span className="text-muted-foreground">{translateConfidenceKey(key)}</span>
+                              <span className="font-medium tabular-nums">{pct}%</span>
                             </div>
+                            <Progress
+                              value={pct}
+                              className={cn(
+                                "h-1.5",
+                                pct >= 70
+                                  ? "[&>div]:bg-emerald-500"
+                                  : pct >= 40
+                                    ? "[&>div]:bg-amber-500"
+                                    : "[&>div]:bg-red-500",
+                              )}
+                            />
                           </div>
-                        ))}
+                        );
+                      })}
+                      <p className="text-[10px] leading-snug text-muted-foreground">
+                        Самооценка модели — ориентир, а не вероятность диагноза.
+                      </p>
+                    </CardContent>
+                  </Card>
+                )}
+              </div>
+            </div>
+          </TabsContent>
+
+          {/* ============================================================
+              ГИПОТЕЗЫ
+              ============================================================ */}
+          <TabsContent value="diagnoses" className="space-y-3 p-3">
+            {differential.length > 0 ? (
+              <>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-[11px] text-muted-foreground">
+                    Гипотезы упорядочены по вероятности. Разверните карточку: аргументы
+                    «за»/«против», что подтвердит и что исключит, красные флаги. Кнопка
+                    «Подтвердить диагноз» разблокирует терапию по этой гипотезе.
+                  </p>
+                  <Badge variant="outline" className="text-[10px]">
+                    подтверждено: {effectiveConfirmed.length} из {differential.length}
+                  </Badge>
+                </div>
+                <Accordion
+                  type="multiple"
+                  defaultValue={[dxKey(differential[0], 0)]}
+                  className="space-y-2"
+                >
+                  {differential.map((dx, idx) => (
+                    <DifferentialItem
+                      key={dxKey(dx, idx)}
+                      dx={dx}
+                      value={dxKey(dx, idx)}
+                      confirmed={isDxConfirmed(dx.diagnosis)}
+                      onConfirmToggle={(action, evidence) =>
+                        handleConfirmDx(dx.diagnosis, action, evidence)
+                      }
+                      isConfirming={
+                        confirmDxMutation.isPending &&
+                        confirmDxMutation.variables?.diagnosis === dx.diagnosis
+                      }
+                    />
+                  ))}
+                </Accordion>
+              </>
+            ) : (
+              <EmptyBlock
+                icon={ListTree}
+                title="Дифференциальный ряд не сформирован"
+                text="Структурированного блока гипотез нет. Текст заключения доступен во вкладке «Текст ИИ»."
+              />
+            )}
+          </TabsContent>
+
+          {/* ============================================================
+              ОБСЛЕДОВАНИЕ — трекер с подсказками
+              ============================================================ */}
+          <TabsContent value="workup" className="p-3">
+            <WorkupPlanTracker
+              caseId={caseId}
+              items={workupPlan}
+              tracker={structured?.workupTracker}
+              versionLabel={`v${currentVersion}`}
+            />
+          </TabsContent>
+
+          {/* ============================================================
+              ТЕРАПИЯ
+              ============================================================ */}
+          <TabsContent value="therapy" className="space-y-3 p-3">
+            {therapyOptions.length > 0 ? (
+              <>
+                <Alert className="border-amber-500/40 bg-amber-500/5 [&>svg]:text-amber-600">
+                  <AlertTriangle className="h-4 w-4" />
+                  <AlertTitle className="text-xs font-semibold text-amber-800 dark:text-amber-300">
+                    Терапия — только после подтверждения диагноза
+                  </AlertTitle>
+                  <AlertDescription className="text-xs text-amber-800/90 dark:text-amber-200/90">
+                    Опции привязаны к гипотезам и подлежат применению только ПОСЛЕ
+                    подтверждения результатами дообследования.
+                    {effectiveConfirmed.length === 0
+                      ? " Сейчас все карточки заблокированы: подтвердите гипотезу во вкладке «Гипотезы»."
+                      : ` Разблокированы для: ${effectiveConfirmed.join(", ")}.`}
+                  </AlertDescription>
+                </Alert>
+                <div className="grid gap-3 lg:grid-cols-2">
+                  {therapyOptions.map((t, i) => {
+                    const targetDx = t.targetDx?.trim();
+                    const isUnlocked = targetDx
+                      ? effectiveConfirmed.some((d) => d.toLowerCase() === targetDx.toLowerCase())
+                      : false;
+                    return <TherapyCard key={i} option={t} unlocked={isUnlocked} />;
+                  })}
+                </div>
+              </>
+            ) : (
+              <EmptyBlock
+                icon={Pill}
+                title="Терапевтические опции не сформированы"
+                text="Модель не предложила вариант терапии либо структурированный блок отсутствует."
+              />
+            )}
+          </TabsContent>
+
+          {/* ============================================================
+              МОНИТОРИНГ
+              ============================================================ */}
+          <TabsContent value="monitoring" className="p-3">
+            {monitoringPlan.length > 0 ? (
+              <div className="grid gap-2 sm:grid-cols-2">
+                {monitoringPlan.map((m, i) => (
+                  <div key={i} className="rounded-lg border p-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-semibold">{m.marker}</span>
+                      {m.frequency && (
+                        <Badge variant="outline" className="ml-auto text-[10px]">
+                          {m.frequency}
+                        </Badge>
+                      )}
+                    </div>
+                    {(m.target || m.purpose) && (
+                      <div className="mt-1 space-y-0.5 text-[11px] text-muted-foreground">
+                        {m.target && (
+                          <p>
+                            <span className="font-medium text-foreground">Цель: </span>
+                            {m.target}
+                          </p>
+                        )}
+                        {m.purpose && (
+                          <p>
+                            <span className="font-medium text-foreground">Зачем: </span>
+                            {m.purpose}
+                          </p>
+                        )}
                       </div>
                     )}
                   </div>
                 ))}
               </div>
-            </div>
-          </CardContent>
-        </Card>
-      )}
+            ) : (
+              <EmptyBlock
+                icon={HeartPulse}
+                title="План контроля не сформирован"
+                text="Для терапии без плана мониторинга проверка покажет отдельное замечание."
+              />
+            )}
+          </TabsContent>
 
-      {/* ================================================================
-          13. АНАЛИЗ ИЗОБРАЖЕНИЙ
-          ================================================================ */}
-      {imageFindings.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <ImageIcon className="h-4 w-4 text-violet-600" />
-              Анализ изображений
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="max-h-96 space-y-2 overflow-y-auto pr-1 -mr-1">
-              {imageFindings.map((f, i) => (
-                <div key={i} className="rounded-lg border p-3">
-                  <div className="mb-1 flex items-center justify-between">
-                    <span className="text-xs text-muted-foreground">Снимок #{i + 1}</span>
-                    <SuspicionBadge level={f.suspicion} />
+          {/* ============================================================
+              ИСТОЧНИКИ
+              ============================================================ */}
+          <TabsContent value="evidence" className="space-y-3 p-3">
+            <DDIAlertsCard caseId={caseId} alerts={analysis.ddiAlerts ?? []} />
+
+            {icd10Suggestions.length > 0 && (
+              <Card className="gap-3 rounded-lg py-3">
+                <CardHeader className="px-3 pb-1.5">
+                  <CardTitle className="flex items-center gap-2 text-sm">
+                    <Code className="h-4 w-4 text-primary" aria-hidden />
+                    МКБ-10
+                    <Badge variant="secondary" className="ml-auto text-[10px]">
+                      {icd10Suggestions.length}
+                    </Badge>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="px-3">
+                  <div className="flex flex-wrap gap-2">
+                    {icd10Suggestions.map((code, i) => (
+                      <div key={i} className="rounded-md border px-2.5 py-1.5">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-xs font-semibold text-primary">
+                            {code.code}
+                          </span>
+                          <Badge variant="outline" className="text-[10px]">
+                            {Math.round(code.confidence * 100)}%
+                          </Badge>
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">{code.description}</p>
+                      </div>
+                    ))}
                   </div>
-                  <p className="text-sm">{f.description}</p>
-                  {f.measurements && <p className="mt-1 text-xs text-muted-foreground">Размеры: {f.measurements}</p>}
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
+                </CardContent>
+              </Card>
+            )}
 
-      {/* ================================================================
-          14. ЦИТАТЫ-ИСТОЧНИКИ (XAI)
-          ================================================================ */}
-      {citations.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Quote className="h-4 w-4 text-primary" />
-              Цитаты-источники (XAI)
-              <Badge variant="secondary" className="ml-auto">{citations.length}</Badge>
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="max-h-96 overflow-y-auto pr-1 -mr-1">
-              <div className="space-y-2">
-                {citations.map((cit, i) => {
-                  const info = classifySource(cit.source, cit.location);
-                  const isMinzdrav = info.label === "КР Минздрава РФ";
-                  return (
-                  <button
-                    key={i}
-                    onClick={() => handleCitationClick(cit)}
-                    className={cn(
-                      "w-full rounded-lg border p-3 text-left transition-colors hover:bg-accent/50",
-                      activeCitation === cit.claim && "border-primary bg-primary/5",
-                      isMinzdrav && "border-teal-500/30 bg-teal-500/5",
-                    )}
-                    aria-label={`Показать цитату: ${cit.claim.slice(0, 60)}`}
-                  >
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Quote className="h-4 w-4 shrink-0 text-muted-foreground" />
-                      <SourceBadge source={cit.source} location={cit.location} />
-                      {cit.location && <span className="ml-auto max-w-[45%] truncate text-xs text-muted-foreground" title={cit.location}>{cit.location}</span>}
+            <div className="grid gap-3 lg:grid-cols-2">
+              <Card className="gap-3 rounded-lg py-3">
+                <CardHeader className="px-3 pb-1.5">
+                  <CardTitle className="flex items-center gap-2 text-sm">
+                    <Dna className="h-4 w-4 text-emerald-600" aria-hidden />
+                    Генетические варианты
+                    <Badge variant="secondary" className="ml-auto text-[10px]">
+                      {mutations.length}
+                    </Badge>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="px-3">
+                  {mutations.length > 0 ? (
+                    <div className="max-h-72 space-y-1.5 overflow-y-auto pr-1">
+                      {mutations.map((m, i) => (
+                        <div key={i} className="rounded-md border p-2">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="font-mono text-xs font-semibold">{m.gene}</span>
+                            <span className="text-[11px] text-muted-foreground">{m.variant}</span>
+                            <Badge
+                              variant="outline"
+                              className={cn("ml-auto text-[10px]", sigColor(m.clinicalSignificance))}
+                            >
+                              {sigLabel(m.clinicalSignificance)}
+                            </Badge>
+                          </div>
+                          <p className="mt-0.5 text-[11px] text-muted-foreground">
+                            {m.interpretation}
+                          </p>
+                        </div>
+                      ))}
                     </div>
-                    <p className="mt-1.5 text-sm font-medium">{cit.claim}</p>
-                    {cit.fragment && <p className="mt-1 line-clamp-4 border-l-2 border-teal-500/40 pl-2 text-xs text-muted-foreground">{cit.fragment}</p>}
-                  </button>
-                  );
-                })}
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      )}
+                  ) : (
+                    <p className="text-xs text-muted-foreground">Варианты не выявлены</p>
+                  )}
+                </CardContent>
+              </Card>
 
-      {/* ================================================================
-          15. ПОВТОРИТЬ АНАЛИЗ
-          ================================================================ */}
-      <div className="flex justify-center">
-        <Button variant="outline" onClick={() => onRunAnalysis(false)} disabled={isAnalyzing || !hasDocuments} className="gap-2">
-          {isAnalyzing ? <><Loader2 className="h-4 w-4 animate-spin" /> Анализ выполняется…</> : <><Cpu className="h-4 w-4" /> Повторить анализ</>}
-        </Button>
+              <Card className="gap-3 rounded-lg py-3">
+                <CardHeader className="px-3 pb-1.5">
+                  <CardTitle className="flex items-center gap-2 text-sm">
+                    <BookOpen className="h-4 w-4 text-primary" aria-hidden />
+                    Клинические рекомендации (RAG)
+                    <Badge variant="secondary" className="ml-auto text-[10px]">
+                      {recommendations.length}
+                    </Badge>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="px-3">
+                  {recommendations.length > 0 ? (
+                    <div className="max-h-72 space-y-1.5 overflow-y-auto pr-1">
+                      {recommendations.map((r, i) => (
+                        <div key={i} className="rounded-md border p-2">
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="text-xs font-medium">{r.title}</span>
+                            <Badge variant="outline" className="shrink-0 text-[10px]">
+                              {Math.round(r.relevanceScore * 100)}%
+                            </Badge>
+                          </div>
+                          <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                            {r.gene && <span className="font-mono">{r.gene}</span>}
+                            <span>{r.source}</span>
+                            {r.evidenceLevel && (
+                              <Badge variant="secondary" className="text-[10px]">
+                                ур. {r.evidenceLevel}
+                              </Badge>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      Релевантные рекомендации не найдены
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+
+            {pathwayMatches.length > 0 && (
+              <Card className="gap-3 rounded-lg py-3">
+                <CardHeader className="px-3 pb-1.5">
+                  <CardTitle className="flex items-center gap-2 text-sm">
+                    <Activity className="h-4 w-4 text-primary" aria-hidden />
+                    Клинические пути
+                    <Badge variant="secondary" className="ml-auto text-[10px]">
+                      {pathwayMatches.length}
+                    </Badge>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-2 px-3">
+                  {pathwayMatches.map((pathway, i) => (
+                    <div key={i} className="rounded-md border p-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-medium">{pathway.name}</span>
+                        <Badge variant="outline" className="text-[10px]">
+                          {Math.round(pathway.matchScore * 100)}%
+                        </Badge>
+                      </div>
+                      <p className="text-[11px] text-muted-foreground">
+                        {pathway.category}
+                        {pathway.icd10Code ? ` · МКБ-10: ${pathway.icd10Code}` : ""}
+                      </p>
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+            )}
+
+            {imageFindings.length > 0 && (
+              <Card className="gap-3 rounded-lg py-3">
+                <CardHeader className="px-3 pb-1.5">
+                  <CardTitle className="flex items-center gap-2 text-sm">
+                    <ImageIcon className="h-4 w-4 text-violet-600" aria-hidden />
+                    Анализ изображений
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-2 px-3">
+                  {imageFindings.map((f, i) => (
+                    <div key={i} className="rounded-md border p-2.5">
+                      <div className="mb-1 flex items-center justify-between">
+                        <span className="text-[11px] text-muted-foreground">Снимок #{i + 1}</span>
+                        <SuspicionBadge level={f.suspicion} />
+                      </div>
+                      <p className="text-xs">{f.description}</p>
+                      {f.measurements && (
+                        <p className="text-[11px] text-muted-foreground">
+                          Размеры: {f.measurements}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+            )}
+
+            {citations.length > 0 && (
+              <Card className="gap-3 rounded-lg py-3">
+                <CardHeader className="px-3 pb-1.5">
+                  <CardTitle className="flex items-center gap-2 text-sm">
+                    <Quote className="h-4 w-4 text-primary" aria-hidden />
+                    Цитаты-источники (XAI)
+                    <Badge variant="secondary" className="ml-auto text-[10px]">
+                      {citations.length}
+                    </Badge>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="px-3">
+                  <div className="max-h-96 space-y-1.5 overflow-y-auto pr-1">
+                    {citations.map((cit, i) => {
+                      const info = classifySource(cit.source, cit.location);
+                      const isMinzdrav = info.label === "КР Минздрава РФ";
+                      return (
+                        <button
+                          key={i}
+                          onClick={() => handleCitationClick(cit)}
+                          className={cn(
+                            "w-full rounded-md border p-2.5 text-left transition-colors hover:bg-accent/50",
+                            activeCitation === cit.claim && "border-primary bg-primary/5",
+                            isMinzdrav && "border-teal-500/30 bg-teal-500/5",
+                          )}
+                          aria-label={`Показать цитату: ${cit.claim.slice(0, 60)}`}
+                        >
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <SourceBadge source={cit.source} location={cit.location} />
+                            {cit.location && (
+                              <span
+                                className="ml-auto max-w-[45%] truncate text-[10px] text-muted-foreground"
+                                title={cit.location}
+                              >
+                                {cit.location}
+                              </span>
+                            )}
+                          </div>
+                          <p className="mt-1 text-xs font-medium">{cit.claim}</p>
+                          {cit.fragment && (
+                            <p className="mt-0.5 line-clamp-3 border-l-2 border-teal-500/40 pl-2 text-[11px] text-muted-foreground">
+                              {cit.fragment}
+                            </p>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {citations.length === 0 &&
+              recommendations.length === 0 &&
+              icd10Suggestions.length === 0 &&
+              (analysis.ddiAlerts ?? []).length === 0 && (
+                <EmptyBlock
+                  icon={BookOpen}
+                  title="Источники не приложены"
+                  text="Ни цитат, ни найденных клинических рекомендаций. Проверка отметит это как замечание по обоснованности."
+                />
+              )}
+          </TabsContent>
+
+          {/* ============================================================
+              ТЕКСТ ИИ
+              ============================================================ */}
+          <TabsContent value="raw" className="space-y-3 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-[11px] text-muted-foreground">
+                Исходное заключение модели. Структурированные вкладки построены из этого
+                текста — при расхождении приоритет у текста и первичных документов.
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1.5 px-2 text-[11px]"
+                onClick={copyConclusion}
+              >
+                <Copy className="h-3 w-3" aria-hidden />
+                Скопировать
+              </Button>
+            </div>
+
+            {analysis.conclusion && (
+              <div className="rounded-lg border border-l-4 border-l-primary bg-card p-3">
+                <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-primary">
+                  <FileText className="h-3.5 w-3.5" aria-hidden />
+                  Заключение
+                </div>
+                <p className="whitespace-pre-wrap text-xs leading-relaxed">
+                  {stripMarkdown(analysis.conclusion)}
+                </p>
+              </div>
+            )}
+
+            {sections.length > 0 ? (
+              <div className="space-y-2">
+                {sections.map((section, idx) => (
+                  <div key={idx} className="rounded-lg border p-3">
+                    <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                      <h4 className="text-xs font-semibold uppercase tracking-wide">
+                        {section.title}
+                      </h4>
+                      <Badge variant="outline" className="text-[10px]">
+                        {Math.round((section.confidence ?? 0) * 100)}% уверенность
+                      </Badge>
+                    </div>
+                    <div className="whitespace-pre-wrap text-xs leading-relaxed">
+                      {stripMarkdown(section.content)}
+                    </div>
+                    {section.citations && section.citations.length > 0 && (
+                      <div className="mt-1.5 flex flex-wrap gap-1">
+                        {section.citations.map((citOrId: string | Citation, ci: number) => {
+                          const cit =
+                            typeof citOrId === "string"
+                              ? citations.find((c) => c.claim === citOrId)
+                              : citOrId;
+                          if (!cit) return null;
+                          return (
+                            <button
+                              key={ci}
+                              onClick={() => handleCitationClick(cit)}
+                              className={cn(
+                                "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] transition-colors hover:bg-accent",
+                                activeCitation === cit.claim && "border-primary bg-primary/10",
+                              )}
+                              aria-label={`Показать цитату: ${cit.claim.slice(0, 60)}`}
+                            >
+                              <Quote className="h-2.5 w-2.5" aria-hidden />
+                              {cit.claim.slice(0, 38)}
+                              {cit.claim.length > 38 && "…"}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              !analysis.conclusion && (
+                <EmptyBlock
+                  icon={AlignLeft}
+                  title="Текст заключения отсутствует"
+                  text="Модель не вернула заключение. Проверьте статус ИИ-сервера и повторите анализ."
+                />
+              )
+            )}
+          </TabsContent>
+
+          {/* ============================================================
+              ПРОВЕРКА
+              ============================================================ */}
+          <TabsContent value="audit" className="p-3">
+            <AnalysisAuditPanel
+              report={audit}
+              verification={verification}
+              normalizationFixes={structured?.normalizationFixes ?? []}
+              onNavigate={(target) => setTab(target)}
+            />
+          </TabsContent>
+        </Tabs>
       </div>
 
       {/* Version history dialog */}
@@ -1115,6 +1444,25 @@ export function AnalysisPanel({ analysis, caseId, onRunAnalysis, isAnalyzing, ha
         open={versionHistoryOpen}
         onOpenChange={setVersionHistoryOpen}
       />
+    </div>
+  );
+}
+
+/** Пустое состояние вкладки. */
+function EmptyBlock({
+  icon: Icon,
+  title,
+  text,
+}: {
+  icon: LucideIcon;
+  title: string;
+  text: string;
+}) {
+  return (
+    <div className="flex flex-col items-center gap-1.5 rounded-lg border border-dashed p-6 text-center">
+      <Icon className="h-6 w-6 text-muted-foreground/50" aria-hidden />
+      <p className="text-sm font-medium">{title}</p>
+      <p className="max-w-md text-xs text-muted-foreground">{text}</p>
     </div>
   );
 }
@@ -1841,181 +2189,6 @@ function TherapyCard({
           {option.targetDx ? ` «${option.targetDx}»` : ""}. Подтвердите диагноз
           кнопкой в карточке соответствующей гипотезы дифференциального ряда.
         </p>
-      )}
-    </div>
-  );
-}
-
-// ===========================================================================
-// v5.1 (audit 9 / fail 4c): WorkupCard — расширенная карточка обследования
-// с интерпретационными полями и мульти-таргет confirm/refute badges.
-// ===========================================================================
-
-function WorkupCard({
-  caseId,
-  itemKey,
-  item,
-  done,
-  groupShort,
-  groupBadgeCls,
-  onToggle,
-  hasInterpretationFields,
-}: {
-  caseId: string;
-  itemKey: string;
-  item: WorkupItem;
-  done: boolean;
-  groupShort: string;
-  groupBadgeCls: string;
-  onToggle: (key: string) => void;
-  hasInterpretationFields: boolean;
-}) {
-  const [interpretOpen, setInterpretOpen] = React.useState(false);
-  return (
-    <div
-      className={cn(
-        "rounded-lg border p-2.5 transition-colors",
-        done ? "border-emerald-500/40 bg-emerald-500/5" : "hover:bg-accent/40",
-      )}
-    >
-      <div className="flex items-center gap-3">
-        <Checkbox
-          id={`workup-${caseId}-${itemKey}`}
-          checked={done}
-          onCheckedChange={() => onToggle(itemKey)}
-          className="data-[state=checked]:border-emerald-600 data-[state=checked]:bg-emerald-600 data-[state=checked]:text-white"
-          aria-label={`Отметить выполненным: ${item.name}`}
-        />
-        <label
-          htmlFor={`workup-${caseId}-${itemKey}`}
-          className="flex min-h-[44px] flex-1 cursor-pointer flex-col justify-center gap-0.5 py-1"
-        >
-          <span
-            className={cn(
-              "text-sm font-medium leading-snug",
-              done && "text-muted-foreground line-through",
-            )}
-          >
-            {item.name}
-          </span>
-          {item.purpose && (
-            <span className="text-xs text-muted-foreground">{item.purpose}</span>
-          )}
-        </label>
-        <div className="flex shrink-0 flex-col items-end gap-1">
-          <Badge variant="outline" className={cn("text-[10px]", groupBadgeCls)}>
-            {groupShort}
-          </Badge>
-          {item.targetDx && !hasInterpretationFields && (
-            <Badge
-              variant="outline"
-              className="max-w-40 truncate text-[10px]"
-              title={item.targetDx}
-            >
-              {item.targetDx}
-            </Badge>
-          )}
-        </div>
-      </div>
-
-      {/* Confirm / Refute badges (multi-target) */}
-      {((item.targetDxConfirm && item.targetDxConfirm.length > 0) ||
-        (item.targetDxRefute && item.targetDxRefute.length > 0)) && (
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {item.targetDxConfirm?.map((dx, i) => (
-            <Badge
-              key={`c-${i}`}
-              variant="outline"
-              className="max-w-full truncate text-[10px] border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-              title={dx}
-            >
-              <Check className="mr-0.5 h-3 w-3" aria-hidden />
-              подтверждает: {dx}
-            </Badge>
-          ))}
-          {item.targetDxRefute?.map((dx, i) => (
-            <Badge
-              key={`r-${i}`}
-              variant="outline"
-              className="max-w-full truncate text-[10px] border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300"
-              title={dx}
-            >
-              <X className="mr-0.5 h-3 w-3" aria-hidden />
-              исключает: {dx}
-            </Badge>
-          ))}
-        </div>
-      )}
-
-      {/* Quick facts: expected result, normal range, confirms/refutes if */}
-      {(item.expectedResult || item.normalRange || item.cutoffs) && (
-        <dl className="mt-2 grid gap-x-3 gap-y-0.5 text-[11px] leading-snug sm:grid-cols-2">
-          {item.expectedResult && (
-            <div className="flex gap-1">
-              <dt className="font-semibold text-muted-foreground">Ожидаемый результат:</dt>
-              <dd className="text-foreground">{item.expectedResult}</dd>
-            </div>
-          )}
-          {item.normalRange && (
-            <div className="flex gap-1">
-              <dt className="font-semibold text-muted-foreground">Норма:</dt>
-              <dd className="text-foreground">{item.normalRange}</dd>
-            </div>
-          )}
-          {item.cutoffs && !item.normalRange && (
-            <div className="flex gap-1">
-              <dt className="font-semibold text-muted-foreground">Пороги:</dt>
-              <dd className="text-foreground">{item.cutoffs}</dd>
-            </div>
-          )}
-          {item.confirmsIf && (
-            <div className="flex gap-1">
-              <dt className="font-semibold text-emerald-700 dark:text-emerald-300">Подтверждает, если:</dt>
-              <dd className="text-foreground">{item.confirmsIf}</dd>
-            </div>
-          )}
-          {item.refutesIf && (
-            <div className="flex gap-1">
-              <dt className="font-semibold text-red-700 dark:text-red-300">Исключает, если:</dt>
-              <dd className="text-foreground">{item.refutesIf}</dd>
-            </div>
-          )}
-        </dl>
-      )}
-
-      {/* Collapsible "Как интерпретировать результат" panel */}
-      {(item.interpretation || hasInterpretationFields) && (
-        <Collapsible
-          open={interpretOpen}
-          onOpenChange={setInterpretOpen}
-          className="mt-2"
-        >
-          <CollapsibleTrigger asChild>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 gap-1 px-2 text-[11px] text-primary hover:text-primary/80"
-            >
-              {interpretOpen ? (
-                <ChevronDown className="h-3 w-3" aria-hidden />
-              ) : (
-                <ChevronRight className="h-3 w-3" aria-hidden />
-              )}
-              Как интерпретировать результат
-            </Button>
-          </CollapsibleTrigger>
-          <CollapsibleContent className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-            {item.interpretation ? (
-              <p className="border-l-2 border-primary/30 pl-2">{item.interpretation}</p>
-            ) : (
-              <p className="pl-2 italic">
-                Подробное руководство по интерпретации не сформировано ИИ.
-                Опирайтесь на значения «Ожидаемый результат» / «Норма» /
-                «Подтверждает, если» / «Исключает, если» выше и сверьтесь с КР.
-              </p>
-            )}
-          </CollapsibleContent>
-        </Collapsible>
       )}
     </div>
   );

@@ -120,6 +120,19 @@ export const controlPanelSchema = z.object({
     /** Необязательное обоснование, чем подтверждено (результаты анализов). */
     evidence: z.string().max(2000).optional(),
   }).optional(),
+  /**
+   * v5.2: трекер выполнения плана дообследования. Ключ трекера считается на
+   * сервере из `name` (normalizeWorkupKey), чтобы клиент не мог записать
+   * произвольный ключ в структуру.
+   */
+  workup: z.object({
+    name: z.string().min(1).max(300),
+    status: z.enum(["planned", "ordered", "completed", "resulted", "cancelled"]),
+    /** Результат/значение, введённое врачом (может быть пустым — очистка). */
+    resultValue: z.string().max(500).optional(),
+    /** Комментарий врача к пункту плана. */
+    comment: z.string().max(1000).optional(),
+  }).optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -210,6 +223,67 @@ export const matchPathwaySchema = z.object({
 
 export const restoreBackupSchema = z.object({
   data: z.string().min(1, "Backup data is required"),
+});
+
+// ---------------------------------------------------------------------------
+// 16. Структурированный вывод ИИ (диф. диагноз / обследование / терапия /
+//     мониторинг). Схема толерантная: неизвестные поля отбрасываются,
+//     отсутствующие — принимают значения по умолчанию. Финальная нормализация
+//     (ранги, вероятности, клампы) выполняется в structured-extraction.ts.
+// ---------------------------------------------------------------------------
+
+const aiProbability = z.union([z.number(), z.string()]).optional();
+
+const aiDifferentialSchema = z.object({
+  diagnosis: z.string().min(1),
+  icd10: z.string().optional(),
+  probability: aiProbability,
+  argumentsFor: z.array(z.string()).default([]),
+  argumentsAgainst: z.array(z.string()).default([]),
+  workup: z.array(z.string()).default([]),
+  redFlags: z.array(z.string()).default([]),
+  notes: z.string().optional(),
+  sources: z.array(z.string()).default([]),
+});
+
+const aiWorkupSchema = z.object({
+  name: z.string().min(1),
+  priority: z.enum(["urgent", "high", "routine"]).default("routine"),
+  purpose: z.string().optional(),
+  targetDxConfirm: z.array(z.string()).default([]),
+  targetDxRefute: z.array(z.string()).default([]),
+  expectedResult: z.string().optional(),
+  normalRange: z.string().optional(),
+  cutoffs: z.string().optional(),
+  confirmsIf: z.string().optional(),
+  refutesIf: z.string().optional(),
+  interpretation: z.string().optional(),
+  timing: z.string().optional(),
+  preparation: z.string().optional(),
+});
+
+const aiTherapySchema = z.object({
+  name: z.string().min(1),
+  regimen: z.string().optional(),
+  evidenceLevel: z.string().optional(),
+  source: z.string().optional(),
+  justification: z.string().optional(),
+  targetDx: z.string().optional(),
+  caution: z.string().optional(),
+});
+
+const aiMonitoringSchema = z.object({
+  marker: z.string().min(1),
+  frequency: z.string().optional(),
+  target: z.string().optional(),
+  purpose: z.string().optional(),
+});
+
+export const aiStructuredSchema = z.object({
+  differential: z.array(aiDifferentialSchema).default([]),
+  workupPlan: z.array(aiWorkupSchema).default([]),
+  therapyOptions: z.array(aiTherapySchema).default([]),
+  monitoringPlan: z.array(aiMonitoringSchema).default([]),
 });
 
 // ---------------------------------------------------------------------------

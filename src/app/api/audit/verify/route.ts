@@ -29,6 +29,7 @@ export async function GET(req: Request) {
     return NextResponse.json({
       ok: result.ok,
       verified: result.verified,
+      truncated: result.truncated,
       brokenAt: result.brokenAt,
       checkedAt: new Date().toISOString(),
     });

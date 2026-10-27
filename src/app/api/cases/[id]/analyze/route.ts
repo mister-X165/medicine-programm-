@@ -19,7 +19,6 @@ import { db } from "@/lib/db";
 import {
   llmChat,
   parseJSON,
-  vlmAnalyzeImage,
   getActiveProvider,
 } from "@/lib/ai-service";
 import {
@@ -34,6 +33,9 @@ import { safeJsonParse } from "@/lib/utils";
 import { requireAuth } from "@/lib/auth";
 import { appendAudit } from "@/lib/audit";
 import { findClinrecByMkb } from "@/lib/minzdrav-cr";
+import { extractStructuredJson } from "@/lib/structured-extraction";
+import { sanitizeClinicalStructure, carryOverDoctorState } from "@/lib/clinical-normalize";
+import { auditAnalysis } from "@/lib/clinical-audit";
 import type {
   Entity,
   Mutation,
@@ -48,6 +50,7 @@ import type {
   TherapyOption,
   MonitoringMarker,
   VerificationReport,
+  PatientSafetyContext,
 } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -186,6 +189,9 @@ async function analyzeCase(req: Request, caseId: string) {
     suspicion: string;
   }> = [];
   let dischargeSummary = "";
+  // v5.2: снапшот данных карты, значимых для детерминированной проверки
+  // безопасности назначений (аллергии, активная терапия, почки, беременность).
+  let patientSafety: PatientSafetyContext | undefined;
 
   const discharges = found.documents.filter((d) => d.fileType === "discharge");
   const genetics = found.documents.filter((d) => d.fileType === "genetic");
@@ -478,12 +484,22 @@ async function analyzeCase(req: Request, caseId: string) {
 
 ПРИНЦИПЫ КЛИНИЧЕСКОГО РАЗБОРА:
 - СНАЧАЛА дифференциальный диагноз: 3–5 гипотез, каждая с аргументами ЗА и ПРОТИВ из данных, оценкой вероятности и планом подтверждения. Ставить ЕДИНСТВЕННЫЙ диагноз ДО обследования — ошибка.
-- ЗАТЕМ сводный план дообследования, закрывающий каждую гипотезу: конкретные лабораторные и инструментальные исследования с приоритетами (срочно/высокий/плановый).
+- ЗАТЕМ сводный план дообследования, закрывающий каждую гипотезу: конкретные лабораторные и инструментальные исследования с приоритетами (срочно/высокий/плановый), сроком выполнения и критерием оценки.
 - ЛЕЧЕНИЕ НЕ НАЗНАЧАТЬ ДО ПОДТВЕРЖДЕНИЯ ДИАГНОЗА. Терапия подаётся ТОЛЬКО как опции в привязке к гипотезам: «если подтвердится [диагноз] — [препарат]», с полным обоснованием: механизм действия, почему предпочтительно именно это, доза/путь/кратность/длительность, уровень доказательности, источник. Для препаратов с серьёзным профилем риска обязательно перечисли, какие обследования/контроли нужны ДО старта терапии.
 - Опирайся на предоставленные фрагменты клинических рекомендаций: КР Минздрава РФ — приоритет №1 (указывай код, напр. «КР Минздрава РФ 601_2»); международные источники (PubMed, ВОЗ, NICE, Cochrane, CDC, ESC, EMA, NCCN) — для сопоставления и доп. доказательств (указывай источник). Не выдумывай коды и названия источников, которых нет в контексте.
-- Для каждого препарата: МНН, доза, путь введения, кратность, длительность.
 - Учитывай DDI и фармакогеномные предупреждения из контекста; старые анализы (>3 мес) помечай «повторить».
 - Язык — русский. Без markdown-обёртки. Начинай сразу с "### КЛИНИЧЕСКАЯ КАРТИНА".
+
+ТРЕБОВАНИЯ К КАЧЕСТВУ (проверяются автоматически; нарушение = брак заключения):
+1. Гипотез ровно 3–5. Вероятности СТРОГО убывают от первой к последней, сумма всех вероятностей ≤ 100%. Одна гипотеза с 90% и ещё две по 70% — ошибка.
+2. У каждой гипотезы минимум ДВА аргумента «за», каждый привязан к конкретному факту из данных, и минимум ОДИН аргумент «против» (или прямая фраза, какого признака не хватает для исключения).
+3. Каждая гипотеза должна быть проверяема: назови тест/признак, который её ПОДТВЕРДИТ, и тест/признак, который её ИСКЛЮЧИТ.
+4. Один тест — один пункт плана. Не дублируй исследование с уточнениями: «СРБ» и «СРБ, количественно» — это ОДИН пункт.
+5. Не включай исследования, которые не изменят тактику: скрининги «на всякий случай», повтор уже выполненных тестов без срока, панели «всё подряд». Если тест не нужен — не пиши его вовсе; в разделе обследования укажи только то, что реально будет назначено.
+6. Для каждого препарата обязательны: МНН, доза с ЕДИНИЦАМИ, путь введения, кратность, длительность. Доза без числа недопустима. Если доза зависит от веса/функции почек — формула и пороговое значение.
+7. Сверь препараты с блоком EMR PATIENT DATA: аллергии и постоянная терапия. При совпадении класса препарата с аллергией — предложи альтернативу и явно напиши это в «Предупреждения». При почечной недостаточности (eGFR/креатинин в контексте) — скорректируй дозу или укажи запрет.
+8. Для каждого красного флага укажи, что делать немедленно (а не только «исключить»).
+9. Не выдумывай коды КР и МКБ-10. Код МКБ-10 указывай только если он корректен для данной гипотезы; иначе не указывай.
 
 ФОРМАТ ОТВЕТА — разделы, каждый начинается строкой "### НАЗВАНИЕ" (заглавными, ровно эти названия):
 
@@ -506,9 +522,9 @@ async function analyzeCase(req: Request, caseId: string) {
 
 ### НЕОБХОДИМОЕ ДОПОЛНИТЕЛЬНОЕ ОБСЛЕДОВАНИЕ
 Каждое исследование — отдельный буллит, СТРОГО в этом каркасе (однострочная разметка через « — » или « | », не считая многострочного поля «Интерпретация»):
-- [Название исследования] — [приоритет: срочно|высокий|плановый] — [зачем: какую гипотезу подтверждает/исключает] — подтверждает гипотезу [названия, через запятую] — исключает гипотезу [названия, через запятую] — ожидаемый результат: [конкретные значения/паттерн при целевой гипотезе] — норма: [референсный диапазон] — подтверждает, если: [критерий позитивного результата для целевой гипотезы] — исключает, если: [критерий негативного/альтернативного результата]
+- [Название исследования] — [приоритет: срочно|высокий|плановый] — [зачем: какую гипотезу подтверждает/исключает] — срок: [когда выполнить: «в течение 1 часа», «в течение 24 ч», «планово, до 7 дней»] — подготовка: [натощак/отмена препарата/без подготовки] — подтверждает гипотезу [названия, через запятую] — исключает гипотезу [названия, через запятую] — ожидаемый результат: [конкретные значения/паттерн при целевой гипотезе] — норма: [референсный диапазон с единицами] — подтверждает, если: [критерий позитивного результата для целевой гипотезы] — исключает, если: [критерий негативного/альтернативного результата]
 На следующей строке под этим буллитом — «Интерпретация: [развёрнутое руководство по интерпретации результата: какие значения/паттерны значимы, на что обратить внимание при росте/снижении, что считается ложно-положительным/ложно-отрицательным, как дифференцировать пограничные значения]».
-ОДНО исследование = ОДИН буллит с полями + одна строка «Интерпретация: …». НЕ объединяй несколько тестов в один буллит. Если поле не применимо (например, нет явного референса) — пиши «—».
+ОДНО исследование = ОДИН буллит с полями + одна строка «Интерпретация: …». НЕ объединяй несколько тестов в один буллит и НЕ дублируй один тест в нескольких буллитах. Если поле не применимо (например, нет явного референса) — пиши «—».
 
 ### ТЕРАПЕВТИЧЕСКИЕ ОПЦИИ ПОСЛЕ ПОДТВЕРЖДЕНИЯ ДИАГНОЗА
 Для каждой гипотезы заголовок: «Если подтверждён [диагноз]:» и под ним строки:
@@ -582,6 +598,31 @@ overall: 0.X`;
           const recentLabs = patientRecord.labResults.filter((l) => l.flag !== 'normal').slice(0, 10);
           if (recentLabs.length > 0) {
             emrParts.push('Abnormal labs: ' + recentLabs.map((l) => l.testName + ': ' + l.value + ' ' + l.unit + ' [' + l.flag + ']').join(', '));
+          }
+          // v5.2: снапшот безопасности — считается ДО обращения к модели, чтобы
+          // формальная проверка рекомендаций (clinical-audit) могла сверить
+          // препараты с аллергиями/почечной функцией без участия ИИ.
+          const labForSafety = patientRecord.labResults.slice(0, 30);
+          const egfrLab = labForSafety.find((l) => /egfr|скф|клубочков/i.test(l.testName));
+          const creatLab = labForSafety.find((l) => /креатинин|creatinine/i.test(l.testName));
+          const age =
+            patientRecord.birthYear && patientRecord.birthYear > 1850
+              ? new Date().getFullYear() - patientRecord.birthYear
+              : undefined;
+          patientSafety = {
+            allergies: allergiesArr.map((a) => a.allergen ?? '').filter(Boolean),
+            activeMedications: activeMeds.map((m) => m.drugName).filter(Boolean),
+            age,
+            sex: patientRecord.sex || undefined,
+            renal: egfrLab
+              ? `${egfrLab.testName}: ${egfrLab.value} ${egfrLab.unit}`
+              : creatLab
+                ? `${creatLab.testName}: ${creatLab.value} ${creatLab.unit}`
+                : undefined,
+            capturedAt: new Date().toISOString(),
+          };
+          if (patientSafety.allergies && patientSafety.allergies.length > 0) {
+            emrParts.push('ALLERGIES (safety snapshot): ' + patientSafety.allergies.join(', '));
           }
           contextParts.push('=== EMR PATIENT DATA ===\n' + emrParts.join('\n') + '\n=== END EMR DATA ===');
         }
@@ -734,12 +775,46 @@ if (mutations.length > 0) {
     }
 
     // ─── v5.0: СТРУКТУРИРОВАННЫЙ РАЗБОР финального текста ─────────────────
-    structured = await parseStructuredFromText(raw ?? "", sections, {
-      differentialText: findSectionText(sections, ["ДИФФЕРЕНЦИАЛЬНЫЙ ДИАГНОЗ"]),
-      workupText: findSectionText(sections, ["НЕОБХОДИМОЕ ДОПОЛНИТЕЛЬНОЕ ОБСЛЕДОВАНИЕ", "ДОПОЛНИТЕЛЬНОЕ ОБСЛЕДОВАНИЕ"]),
-      therapyText: findSectionText(sections, ["ТЕРАПЕВТИЧЕСКИЕ ОПЦИИ"]),
-      monitoringText: findSectionText(sections, ["МАРКЕРЫ И МОНИТОРИНГ", "МАРКЕРЫ", "МОНИТОРИНГ"]),
-    }, verification);
+    // Основной путь — надёжный JSON-проход (structured-extraction.ts):
+    // отдельный вызов модели-структуризатора читает готовый текст заключения
+    // и возвращает строгий JSON, валидируемый zod. Это устраняет хрупкость
+    // regex-разбора. При неудаче — откат на прежний эвристический разбор.
+    const structuredJson = aiAvailable ? await extractStructuredJson(raw ?? "") : null;
+    if (structuredJson && (structuredJson.differential?.length || structuredJson.workupPlan?.length)) {
+      structured = {
+        differential: structuredJson.differential ?? [],
+        workupPlan: structuredJson.workupPlan ?? [],
+        therapyOptions: structuredJson.therapyOptions ?? [],
+        monitoringPlan: structuredJson.monitoringPlan ?? [],
+        verification,
+      };
+      logger.info("analysis", "Структуризация выполнена JSON-проходом", {
+        caseId,
+        differential: structured.differential.length,
+        workup: structured.workupPlan.length,
+        therapy: structured.therapyOptions.length,
+        monitoring: structured.monitoringPlan.length,
+      });
+    } else {
+      structured = await parseStructuredFromText(raw ?? "", sections, {
+        differentialText: findSectionText(sections, ["ДИФФЕРЕНЦИАЛЬНЫЙ ДИАГНОЗ"]),
+        workupText: findSectionText(sections, ["НЕОБХОДИМОЕ ДОПОЛНИТЕЛЬНОЕ ОБСЛЕДОВАНИЕ", "ДОПОЛНИТЕЛЬНОЕ ОБСЛЕДОВАНИЕ"]),
+        therapyText: findSectionText(sections, ["ТЕРАПЕВТИЧЕСКИЕ ОПЦИИ"]),
+        monitoringText: findSectionText(sections, ["МАРКЕРЫ И МОНИТОРИНГ", "МАРКЕРЫ", "МОНИТОРИНГ"]),
+      }, verification);
+    }
+    // v5.2: ДЕТЕРМИНИРОВАННАЯ НОРМАЛИЗАЦИЯ структуры до сохранения.
+    // Устраняем дубли исследований, восстанавливаем ранги/вероятности,
+    // приводим targetDx терапии к точному названию гипотезы. Все правки
+    // перечисляются в normalizationFixes и видны врачу в разделе «Проверка».
+    const sanitized = sanitizeClinicalStructure(structured);
+    structured = { ...sanitized.structured, patientSafety };
+    if (sanitized.fixes.length > 0) {
+      logger.info("analysis", "Структура рекомендаций нормализована", {
+        caseId,
+        fixes: sanitized.fixes.slice(0, 10),
+      });
+    }
     // Best-effort: сверка гипотез с репозиторием КР Минздрава по МКБ-10
     await attachClinrecsToDifferential(structured.differential);
 
@@ -753,6 +828,29 @@ if (mutations.length > 0) {
   // Get existing analysis to check version
   const existingAnalysis = await db.analysisResult.findUnique({ where: { caseId } });
   let newVersion = 1;
+
+  // v5.2: ПЕРЕНОС РЕШЕНИЙ ВРАЧА. Повторный анализ не должен молча стирать
+  // подтверждённые диагнозы и отметки трекера: это клиническая работа врача,
+  // а не вывод модели. Переносим только то, что осталось в новой структуре.
+  let carriedInfo = { confirmedDx: 0, workup: 0 };
+  if (existingAnalysis?.structured) {
+    try {
+      const prev = JSON.parse(existingAnalysis.structured) as AnalysisStructured;
+      const carried = carryOverDoctorState(prev, structured);
+      structured = carried.structured;
+      carriedInfo = carried.carried;
+    } catch {
+      // Битый JSON старой версии — не блокируем анализ.
+    }
+  }
+
+  // v5.2: формальная проверка набора рекомендаций (детерминированная,
+  // без ИИ). Результат пишется в аудит-журнал — это метрика качества,
+  // которую можно отслеживать по клинике.
+  const auditReport = auditAnalysis({
+    structured,
+    citationsCount: citations.length,
+  });
 
   if (existingAnalysis) {
     // Save current state as a version snapshot before overwriting
@@ -849,6 +947,11 @@ if (mutations.length > 0) {
       therapyOptionCount: structured.therapyOptions.length,
       verificationPerformed: structured.verification.performed,
       verificationPasses: structured.verification.passes,
+      auditScore: auditReport.score,
+      auditCritical: auditReport.critical,
+      auditWarnings: auditReport.warning,
+      carriedConfirmedDx: carriedInfo.confirmedDx,
+      carriedWorkupNotes: carriedInfo.workup,
       version: newVersion,
       consentId: aiConsent?.id,
     }),
@@ -874,6 +977,7 @@ if (mutations.length > 0) {
       structured,
       version: newVersion,
       aiAvailable,
+      audit: auditReport,
       createdAt: analysis.createdAt.toISOString(),
       updatedAt: analysis.updatedAt.toISOString(),
     },
@@ -1400,6 +1504,8 @@ export function parseWorkup(text: string): WorkupItem[] {
     let normalRange: string | undefined;
     let confirmsIf: string | undefined;
     let refutesIf: string | undefined;
+    let timing: string | undefined;
+    let preparation: string | undefined;
 
     const p1 = (parts[1] ?? "").trim().toLowerCase();
     if (/сроч|urgent|экстрен|немедлен/i.test(p1)) priority = "urgent";
@@ -1430,6 +1536,11 @@ export function parseWorkup(text: string): WorkupItem[] {
       ?? extractExplicit(t, "положительно при");
     refutesIf = extractExplicit(t, "исключает, если")
       ?? extractExplicit(t, "отрицательно при");
+    // v5.2: срок и подготовка — нужны врачу для очерёдности и направления.
+    timing = extractExplicit(t, "срок")
+      ?? extractExplicit(t, "когда выполнить");
+    preparation = extractExplicit(t, "подготовка")
+      ?? extractExplicit(t, "подготовка к исследованию");
 
     // Легаси: если новых тегов не было, targetDx достаём по старому regex.
     if (!targetDxConfirm || targetDxConfirm.length === 0) {
@@ -1451,6 +1562,8 @@ export function parseWorkup(text: string): WorkupItem[] {
           .replace(/—?\s*норма[:—-]?\s*[^—|]*(?=\s+[—|]\s|$)/iu, "")
           .replace(/—?\s*подтверждает,\s+если[:—-]?\s*[^—|]*(?=\s+[—|]\s|$)/iu, "")
           .replace(/—?\s*исключает,\s+если[:—-]?\s*[^—|]*(?=\s+[—|]\s|$)/iu, "")
+          .replace(/—?\s*срок[:—-]?\s*[^—|]*(?=\s+[—|]\s|$)/iu, "")
+          .replace(/—?\s*подготовка[:—-]?\s*[^—|]*(?=\s+[—|]\s|$)/iu, "")
           .replace(/\s+[—|]\s*$/, "")
           .trim()
       : undefined;
@@ -1466,6 +1579,8 @@ export function parseWorkup(text: string): WorkupItem[] {
       normalRange,
       confirmsIf,
       refutesIf,
+      timing,
+      preparation,
     });
   }
   return out.slice(0, 15);

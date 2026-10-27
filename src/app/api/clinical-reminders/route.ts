@@ -183,7 +183,7 @@ export async function GET(req: Request) {
       ...immunizationReminders,
     ];
 
-    const priorityOrder = { urgent: 0, high: 1, medium: 2, low: 3 };
+    const priorityOrder: Record<string, number> = { urgent: 0, high: 1, medium: 2, low: 3 };
     allReminders.sort((a, b) => {
       const po = priorityOrder[a.priority] - priorityOrder[b.priority];
       if (po !== 0) return po;

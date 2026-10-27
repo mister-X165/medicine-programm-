@@ -14,12 +14,13 @@ const eslintConfig = [
   ...nextTypescript,
   {
     rules: {
-      // TypeScript rules
+      // TypeScript rules — правила корректности возвращены как warning,
+      // чтобы реальные баги всплывали в редакторе/CI, не блокируя работу.
       "@typescript-eslint/no-explicit-any": "off",
-      "@typescript-eslint/no-unused-vars": "off",
+      "@typescript-eslint/no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
       "@typescript-eslint/no-non-null-assertion": "off",
       "@typescript-eslint/ban-ts-comment": "off",
-      "@typescript-eslint/prefer-as-const": "off",
+      "@typescript-eslint/prefer-as-const": "warn",
       "@typescript-eslint/no-unused-disable-directive": "off",
 
       // React rules
@@ -36,18 +37,18 @@ const eslintConfig = [
       "@next/next/no-html-link-for-pages": "off",
 
       // General JavaScript rules
-      "prefer-const": "off",
-      "no-unused-vars": "off",
+      "prefer-const": "warn",
+      "no-unused-vars": "off", // перекрыт @typescript-eslint/no-unused-vars
       "no-console": "off",
-      "no-debugger": "off",
+      "no-debugger": "warn",
       "no-empty": "off",
       "no-irregular-whitespace": "off",
       "no-case-declarations": "off",
-      "no-fallthrough": "off",
+      "no-fallthrough": "warn",
       "no-mixed-spaces-and-tabs": "off",
-      "no-redeclare": "off",
-      "no-undef": "off",
-      "no-unreachable": "off",
+      "no-redeclare": "warn",
+      "no-undef": "off", // проверяет TypeScript
+      "no-unreachable": "warn",
       "no-useless-escape": "off",
     },
   },

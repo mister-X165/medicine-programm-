@@ -61,9 +61,6 @@ const nextConfig: NextConfig = {
     "localhost",
     "preview-chat-6bc2caed-466b-4f12-9939-589fb88dd05d.space-z.ai",
   ],
-  typescript: {
-    ignoreBuildErrors: true,
-  },
   reactStrictMode: false,
   poweredByHeader: false,
   async headers() {

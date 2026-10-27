@@ -32,6 +32,11 @@ import * as jose from "jose";
 
 const JWT_ISSUER = "sppvr-cdss";
 const JWT_AUDIENCE = "sppvr-cdss-api";
+const JWT_TTL = "2h";
+const JWT_TTL_SECONDS = 2 * 60 * 60;
+// Скользящее продление: если до истечения токена осталось меньше часа,
+// перевыпускаем JWT и обновляем cookie (врач не вылетает посреди смены).
+const RENEW_THRESHOLD_SECONDS = 60 * 60;
 
 const MIN_SECRET_LENGTH = 64;
 
@@ -201,6 +206,34 @@ async function verifyJwt(token: string): Promise<jose.JWTPayload | null> {
 }
 
 // ---------------------------------------------------------------------------
+// Скользящее продление JWT (edge): сохраняет doctorId/doctorCode/role и
+// tokenVersion, чтобы отзыв через инкремент tokenVersion продолжал работать.
+// ---------------------------------------------------------------------------
+async function signRenewedToken(payload: jose.JWTPayload): Promise<string> {
+  const tokenVersion =
+    typeof payload.tokenVersion === "number" ? payload.tokenVersion : 0;
+  return await new jose.SignJWT({
+    doctorId: payload.doctorId,
+    doctorCode: payload.doctorCode,
+    role: payload.role,
+    tokenVersion,
+  })
+    .setProtectedHeader({ alg: "HS256" })
+    .setIssuedAt()
+    .setJti(crypto.randomUUID())
+    .setExpirationTime(JWT_TTL)
+    .setIssuer(JWT_ISSUER)
+    .setAudience(JWT_AUDIENCE)
+    .sign(getSecretKey());
+}
+
+function shouldRenew(payload: jose.JWTPayload): boolean {
+  if (typeof payload.exp !== "number") return false;
+  const remainingSeconds = payload.exp - Math.floor(Date.now() / 1000);
+  return remainingSeconds < RENEW_THRESHOLD_SECONDS;
+}
+
+// ---------------------------------------------------------------------------
 // Admin-only route checks — any logged-in doctor is not enough.
 // ---------------------------------------------------------------------------
 
@@ -310,9 +343,28 @@ export async function proxy(req: NextRequest) {
   requestHeaders.set("x-doctor-code", session.doctorCode as string);
   requestHeaders.set("x-doctor-role", session.role as string);
 
-  return NextResponse.next({
+  const res = NextResponse.next({
     request: { headers: requestHeaders },
   });
+
+  // Скользящее продление: если токен близок к истечению — перевыпускаем и
+  // обновляем HttpOnly-cookie. Новый cookie действует со следующего запроса;
+  // tokenVersion сохраняется, поэтому инкремент tokenVersion (смена пароля/
+  // роли/деактивация) по-прежнему мгновенно отзывает сессию на роут-хендлерах.
+  if (shouldRenew(session)) {
+    const renewed = await signRenewedToken(session);
+    res.cookies.set({
+      name: "token",
+      value: renewed,
+      httpOnly: true,
+      sameSite: "strict",
+      secure: process.env.NODE_ENV === "production",
+      path: "/",
+      maxAge: JWT_TTL_SECONDS,
+    });
+  }
+
+  return res;
 }
 
 // ---------------------------------------------------------------------------
